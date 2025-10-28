@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/cuda:11.0.3-cudnn8-devel-ubuntu20.04
+FROM nvcr.io/nvidia/cuda:11.8.0-devel-ubuntu22.04
 LABEL maintainer="bigscience-workshop"
 LABEL repository="petals"
 
@@ -20,8 +20,11 @@ ENV PATH="/opt/conda/bin:${PATH}"
 RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main \
   && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
 
-RUN conda install python~=3.10.12 pip && \
-    pip install --no-cache-dir "torch>=1.12" && \
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+
+RUN conda install -y python~=3.10.12 pip && \
+    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu118 torch==2.1.2 && \
+    pip install --no-cache-dir bitsandbytes==0.41.3 && \
     conda clean --all && rm -rf ~/.cache/pip
 
 VOLUME /cache
