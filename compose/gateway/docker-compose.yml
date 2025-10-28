@@ -1,0 +1,39 @@
+version: "3.9"
+
+# Volumes:
+# - petals-cache: shared model cache (/cache) to avoid re-downloading weights
+# - dht-state: stores the DHT identity key so the /p2p/<peer_id> stays stable
+volumes:
+  petals-cache:
+  dht-state:
+
+networks:
+  petals-net:
+    name: petals-net
+
+services:
+  # -------------------- API (runs gateway/app.py) --------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      # Model to serve (pick one that fits your GPU; default is tiny for smoke testing)
+      MODEL_ID: ${MODEL_ID}
+      # Public IP/DNS of THIS worker host (no port)
+      WORKER_PUBLIC_IP: ${WORKER_PUBLIC_IP}
+      # Comma-separated list of DHT multiaddrs (copy from dht logs, include /p2p/<peer_id>)
+      INITIAL_PEERS: ${INITIAL_PEERS}
+      # Hugging Face token for gated models
+      HUGGINGFACE_HUB_TOKEN: ${HUGGINGFACE_HUB_TOKEN}
+    container_name: skynet-api
+    # Allow GPU access if available (Windows Compose requires list syntax)
+    gpus:
+      - count: all
+    ports:
+      - "8080:8080" 
+    # When running standalone, ensure DHT is reachable via INITIAL_PEERS
+    networks: [petals-net]
+    restart: unless-stopped

@@ -1,0 +1,37 @@
+version: "3.9"
+
+# Volumes:
+# - dht-state: stores the DHT identity key so the /p2p/<peer_id> stays stable
+volumes:
+  dht-state:
+
+networks:
+  petals-net:
+    name: petals-net
+
+services:
+  # -------------------- DHT BOOTSTRAP (CPU-only) --------------------
+  dht:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: petals-dht
+    # IMPORTANT: Set DHT_PUBLIC_IP to your machine's public IP or DNS name (no port).
+    # This ensures peers on the Internet can dial back to you.
+    environment:
+      - DHT_PUBLIC_IP=${DHT_PUBLIC_IP}
+    env_file:
+      - ./.env
+    command: >
+      bash -lc "
+      if [ -z \"$DHT_PUBLIC_IP\" ]; then
+        echo 'ERROR: Set DHT_PUBLIC_IP to your public IP or DNS (e.g. 203.0.113.10)'; exit 1;
+      fi;
+      python -m petals.cli.run_dht --host_maddrs /ip4/0.0.0.0/tcp/31337 --identity_path /state/bootstrap.id --announce_maddrs /ip4/${DHT_PUBLIC_IP}/tcp/31337
+      "
+    ports:
+      - "31337:31337"       # expose for public peers
+    volumes:
+      - dht-state:/state
+    networks: [petals-net]
+    restart: unless-stopped

@@ -17,6 +17,9 @@ RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -
   bash install_miniconda.sh -b -p /opt/conda && rm install_miniconda.sh
 ENV PATH="/opt/conda/bin:${PATH}"
 
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main \
+  && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
 RUN conda install python~=3.10.12 pip && \
     pip install --no-cache-dir "torch>=1.12" && \
     conda clean --all && rm -rf ~/.cache/pip
