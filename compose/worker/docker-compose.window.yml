@@ -43,7 +43,7 @@ services:
       python -m petals.cli.run_server "$MODEL_ID" --port ${PORT:-31330} --initial_peers "$INITIAL_PEERS" --token "$HUGGINGFACE_HUB_TOKEN" --announce_maddrs /ip4/$WORKER_PUBLIC_IP/tcp/${PORT:-31330} --balance_quality ${BALANCE_QUALITY:-0.3}
       "
     ports:
-      - "31330:31330"
+      - "${PORT:-31330}:${PORT:-31330}"
     volumes:
       - petals-cache:/cache
     # networks: [petals-net]
