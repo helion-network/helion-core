@@ -4,6 +4,8 @@ import time
 import uuid
 import logging
 import re
+import math
+import numbers
 from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -117,6 +119,25 @@ try:
 except Exception:
     logging.getLogger().addHandler(_route_handler)
 
+def _sanitize_jsonable(obj: Any):
+    """
+    Recursively convert non-finite numbers to None and tuples to lists
+    so the structure is safe to serialize to JSON.
+    """
+    try:
+        if isinstance(obj, dict):
+            return {k: _sanitize_jsonable(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sanitize_jsonable(v) for v in obj]
+        if isinstance(obj, tuple):
+            return [_sanitize_jsonable(v) for v in obj]
+        if isinstance(obj, numbers.Real):
+            f = float(obj)
+            return f if math.isfinite(f) else None
+    except Exception:
+        pass
+    return obj
+
 def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
     """
     Best-effort introspection of the last route used by Petals to execute the model.
@@ -161,20 +182,66 @@ def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
         # Pick the first truthy candidate
         route = next((c for c in candidates if c), None)
         if route is None:
+            # As a last resort, try computing a route now via the sequence manager
+            try:
+                transformer = getattr(model, "transformer", None)
+                h = getattr(transformer, "h", None) if transformer is not None else None
+                seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
+                if seq_mgr is not None:
+                    spans = seq_mgr.make_sequence(0, None, mode="min_latency")
+                    detailed: List[Dict[str, Any]] = []
+                    for span in spans:
+                        server = getattr(span, "server_info", None)
+                        item: Dict[str, Any] = {
+                            "peer_id": getattr(getattr(span, "peer_id", None), "to_base58", lambda: str(getattr(span, "peer_id", None)))(),
+                            "start": int(getattr(span, "start", 0)),
+                            "end": int(getattr(span, "end", 0)),
+                        }
+                        if server is not None:
+                            try:
+                                item["server"] = {
+                                    "state": getattr(getattr(server, "state", None), "name", None) or int(getattr(server, "state", 0)),
+                                    "throughput": float(getattr(server, "throughput", None)) if getattr(server, "throughput", None) is not None else None,
+                                    "network_rps": float(getattr(server, "network_rps", None)) if getattr(server, "network_rps", None) is not None else None,
+                                    "forward_rps": float(getattr(server, "forward_rps", None)) if getattr(server, "forward_rps", None) is not None else None,
+                                    "inference_rps": float(getattr(server, "inference_rps", None)) if getattr(server, "inference_rps", None) is not None else None,
+                                    "cache_tokens_left": int(getattr(server, "cache_tokens_left", None)) if getattr(server, "cache_tokens_left", None) is not None else None,
+                                    "next_pings": getattr(server, "next_pings", None),
+                                    "public_name": getattr(server, "public_name", None),
+                                    "version": getattr(server, "version", None),
+                                    "using_relay": getattr(server, "using_relay", None),
+                                    "adapters": list(getattr(server, "adapters", []) or []),
+                                    "torch_dtype": getattr(server, "torch_dtype", None),
+                                    "quant_type": getattr(server, "quant_type", None),
+                                }
+                            except Exception:
+                                pass
+                        detailed.append(item)
+                    if detailed:
+                        return _sanitize_jsonable(detailed)
+            except Exception:
+                pass
+
             # Fallback to captured logs
             with _route_capture_lock:
                 if _last_route_parsed:
-                    return _last_route_parsed
+                    return _sanitize_jsonable(_last_route_parsed)
                 if _last_route_text:
                     parsed_from_text = _parse_route_from_text(_last_route_text)
                     if parsed_from_text:
-                        return parsed_from_text
+                        return _sanitize_jsonable(parsed_from_text)
             return None
+
+        # If the candidate is a plain string, try to parse it
+        if isinstance(route, str):
+            parsed = _parse_route_from_text(route)
+            if parsed:
+                return _sanitize_jsonable(parsed)
 
         # Normalize to list for iteration
         # If we already have a list of dicts, return as-is
         if isinstance(route, list) and route and isinstance(route[0], dict):
-            return route  # expected shape: {peer_id, start, end}
+            return _sanitize_jsonable(route)  # expected shape: {peer_id, start, end}
 
         route_items = list(route) if not isinstance(route, list) else route
         result: List[Dict[str, Any]] = []
@@ -201,10 +268,28 @@ def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
 
         # Filter empty results
         if any(x.get("peer_id") is not None for x in result):
-            return result
+            return _sanitize_jsonable(result)
     except Exception:
         pass
     return None
+
+def _try_get_route_repr() -> Optional[str]:
+    """
+    Best-effort retrieval of a human-readable route string from the sequence manager or captured logs.
+    """
+    try:
+        transformer = getattr(model, "transformer", None)
+        h = getattr(transformer, "h", None) if transformer is not None else None
+        seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
+        seq_state = getattr(seq_mgr, "state", None) if seq_mgr is not None else None
+        route_repr = getattr(seq_state, "last_route_repr", None) if seq_state is not None else None
+        if route_repr:
+            return route_repr
+    except Exception:
+        pass
+    # Fallback to last captured log line
+    with _route_capture_lock:
+        return _last_route_text
 def build_prompt_from_messages(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> str:
     lines: List[str] = []
     # Minimal OpenAI chat-to-prompt conversion
@@ -333,6 +418,18 @@ async def chat_completions(request: Request):
         prompt = build_prompt_from_messages(messages, tools)
         inputs = tokenizer(prompt, return_tensors="pt")["input_ids"]
 
+    # Best-effort: proactively compute a route to make it available for response metadata
+    try:
+        transformer = getattr(model, "transformer", None)
+        h = getattr(transformer, "h", None) if transformer is not None else None
+        seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
+        if seq_mgr is not None:
+            cache_tokens_needed = int(max_tokens)
+            # Trigger route selection so that last_route/last_route_repr are populated
+            seq_mgr.make_sequence(0, None, mode="min_latency", cache_tokens_needed=cache_tokens_needed)
+    except Exception:
+        pass
+
     if stream:
         return StreamingResponse(
             iterate_chat_chunks(
@@ -387,23 +484,13 @@ async def chat_completions(request: Request):
         ],
         "usage": None,
     }
-    # Best-effort: include the worker chain and route text if Petals exposes it in this environment
+    # Best-effort: include both worker chain and route text independently
     worker_chain = _try_get_worker_chain()
     if worker_chain:
         resp["worker_chain"] = worker_chain
-        try:
-            transformer = getattr(model, "transformer", None)
-            h = getattr(transformer, "h", None) if transformer is not None else None
-            seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
-            seq_state = getattr(seq_mgr, "state", None) if seq_mgr is not None else None
-            route_repr = getattr(seq_state, "last_route_repr", None) if seq_state is not None else None
-            if route_repr:
-                resp["route_repr"] = route_repr
-        except Exception:
-            # Fallback to captured text if available
-            with _route_capture_lock:
-                if _last_route_text:
-                    resp["route_repr"] = _last_route_text
+    route_repr = _try_get_route_repr()
+    if route_repr:
+        resp["route_repr"] = route_repr
     # if validation_result is not None:
     #     resp["validation"] = validation_result
     return JSONResponse(resp)
