@@ -48,6 +48,9 @@ class SequenceManagerState:
     sequence_info: Optional[RemoteSequenceInfo] = None
     rpc_info: Optional[dict] = None
     banned_peers: Optional[Blacklist] = None
+    # Best-effort: store last selected route for external consumers (e.g., gateway)
+    last_route_repr: Optional[str] = None
+    last_route: Optional[List[Dict[str, Any]]] = None
 
     def __getitem__(self, ix: Union[int, slice]) -> SequenceManagerState:
         return dataclasses.replace(self, sequence_info=self.sequence_info[ix])
@@ -167,11 +170,26 @@ class RemoteSequenceManager:
         else:
             raise RuntimeError(f"Unexpected mode {mode}")
 
-        if self.config.show_route is True or (mode == "min_latency" and self.config.show_route == "inference"):
+        # Store the last route in a simple, consumable format for external callers
+        try:
             route_repr = " => ".join(
                 [f"{span.start}:{span.end} via …{str(span.peer_id)[-6:]}" for span in span_sequence]
             )
-            logger.info(f"Route found: {route_repr}")
+            self.state.last_route_repr = route_repr
+            self.state.last_route = [
+                {
+                    "peer_id": getattr(span.peer_id, "to_base58", lambda: str(span.peer_id))(),
+                    "start": span.start,
+                    "end": span.end,
+                }
+                for span in span_sequence
+            ]
+        except Exception:
+            # Do not fail routing if formatting fails
+            pass
+
+        if self.config.show_route is True or (mode == "min_latency" and self.config.show_route == "inference"):
+            logger.info(f"Route found: {self.state.last_route_repr}")
         return span_sequence
 
     def _make_sequence_with_min_latency(

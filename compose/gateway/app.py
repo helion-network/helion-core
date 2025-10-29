@@ -97,7 +97,11 @@ class _RouteCaptureHandler(logging.Handler):
         text = msg or ""
         lowered = text.lower()
         # Heuristic: capture lines that likely describe the selected route
-        if ("selected route" in lowered) or ("route" in lowered and ("peer" in lowered or "layer" in lowered)):
+        if (
+            ("selected route" in lowered)
+            or ("route found" in lowered)
+            or ("route" in lowered and ("peer" in lowered or "layer" in lowered))
+        ):
             with _route_capture_lock:
                 _last_route_text = text
                 parsed = _parse_route_from_text(text)
@@ -136,6 +140,16 @@ def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
         # e.g., model.last_route
         candidates.append(getattr(model, "last_route", None))
 
+        # Try to reach RemoteSequenceManager and its stored last route
+        transformer = getattr(model, "transformer", None)
+        h = getattr(transformer, "h", None) if transformer is not None else None
+        seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
+        if seq_mgr is not None:
+            seq_state = getattr(seq_mgr, "state", None)
+            if seq_state is not None:
+                candidates.append(getattr(seq_state, "last_route", None))
+            candidates.append(getattr(seq_mgr, "last_route", None))
+
         # e.g., model.client.last_route or model._client.last_route
         client = getattr(model, "client", None) or getattr(model, "_client", None)
         if client is not None:
@@ -158,6 +172,10 @@ def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
             return None
 
         # Normalize to list for iteration
+        # If we already have a list of dicts, return as-is
+        if isinstance(route, list) and route and isinstance(route[0], dict):
+            return route  # expected shape: {peer_id, start, end}
+
         route_items = list(route) if not isinstance(route, list) else route
         result: List[Dict[str, Any]] = []
         for r in route_items:
@@ -369,10 +387,23 @@ async def chat_completions(request: Request):
         ],
         "usage": None,
     }
-    # Best-effort: include the worker chain if Petals exposes it in this environment
+    # Best-effort: include the worker chain and route text if Petals exposes it in this environment
     worker_chain = _try_get_worker_chain()
     if worker_chain:
         resp["worker_chain"] = worker_chain
+        try:
+            transformer = getattr(model, "transformer", None)
+            h = getattr(transformer, "h", None) if transformer is not None else None
+            seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
+            seq_state = getattr(seq_mgr, "state", None) if seq_mgr is not None else None
+            route_repr = getattr(seq_state, "last_route_repr", None) if seq_state is not None else None
+            if route_repr:
+                resp["route_repr"] = route_repr
+        except Exception:
+            # Fallback to captured text if available
+            with _route_capture_lock:
+                if _last_route_text:
+                    resp["route_repr"] = _last_route_text
     # if validation_result is not None:
     #     resp["validation"] = validation_result
     return JSONResponse(resp)
