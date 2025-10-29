@@ -33,13 +33,8 @@ services:
       if [ -z \"$HUGGINGFACE_HUB_TOKEN\" ]; then
         echo 'ERROR: Set HUGGINGFACE_HUB_TOKEN to Hugging Face token'; exit 1;
       fi;
-      if [ -n \"$BLOCK_INDICES\" ]; then
-        echo \"Using explicit block indices: $BLOCK_INDICES\";
-      else
-        echo \"Auto-detecting block indices\";
-      fi;
       echo \"Running Petals worker with model: $MODEL_ID, public IP: $WORKER_PUBLIC_IP, initial peers: $INITIAL_PEERS, Hugging Face token: $HUGGINGFACE_HUB_TOKEN\";
-      python -m petals.cli.run_server \"$MODEL_ID\" --port 31330 --block_indices $BLOCK_INDICES --initial_peers \"$INITIAL_PEERS\" --token \"$HUGGINGFACE_HUB_TOKEN\" --announce_maddrs /ip4/$WORKER_PUBLIC_IP/tcp/31330
+      python -m petals.cli.run_server "$MODEL_ID" --port 31330 --initial_peers "$INITIAL_PEERS" --token "$HUGGINGFACE_HUB_TOKEN" --announce_maddrs /ip4/$WORKER_PUBLIC_IP/tcp/31330 --balance_quality ${BALANCE_QUALITY:-0.3}
       "
     ports:
       - "31330:31330"
