@@ -176,14 +176,34 @@ class RemoteSequenceManager:
                 [f"{span.start}:{span.end} via …{str(span.peer_id)[-6:]}" for span in span_sequence]
             )
             self.state.last_route_repr = route_repr
-            self.state.last_route = [
-                {
-                    "peer_id": getattr(span.peer_id, "to_base58", lambda: str(span.peer_id))(),
-                    "start": span.start,
-                    "end": span.end,
-                }
-                for span in span_sequence
-            ]
+            detailed_route: List[Dict[str, Any]] = []
+            for span in span_sequence:
+                server = span.server_info
+                detailed_route.append(
+                    {
+                        "peer_id": getattr(span.peer_id, "to_base58", lambda: str(span.peer_id))(),
+                        "start": span.start,
+                        "end": span.end,
+                        "server": {
+                            "state": server.state.name if hasattr(server.state, "name") else int(server.state),
+                            "throughput": float(server.throughput) if server.throughput is not None else None,
+                            "network_rps": float(server.network_rps) if server.network_rps is not None else None,
+                            "forward_rps": float(server.forward_rps) if server.forward_rps is not None else None,
+                            "inference_rps": float(server.inference_rps) if server.inference_rps is not None else None,
+                            "cache_tokens_left": int(server.cache_tokens_left)
+                            if server.cache_tokens_left is not None
+                            else None,
+                            "next_pings": server.next_pings,
+                            "public_name": server.public_name,
+                            "version": server.version,
+                            "using_relay": server.using_relay,
+                            "adapters": list(server.adapters) if server.adapters is not None else None,
+                            "torch_dtype": server.torch_dtype,
+                            "quant_type": server.quant_type,
+                        },
+                    }
+                )
+            self.state.last_route = detailed_route
         except Exception:
             # Do not fail routing if formatting fails
             pass
