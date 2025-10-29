@@ -39,7 +39,7 @@ services:
         echo 'ERROR: Set HUGGINGFACE_HUB_TOKEN to Hugging Face token'; exit 1;
       fi;
       echo \"Running Petals worker with model: $MODEL_ID, public IP: $WORKER_PUBLIC_IP, initial peers: $INITIAL_PEERS, Hugging Face token: $HUGGINGFACE_HUB_TOKEN\";
-      python -m petals.cli.run_server "$MODEL_ID" --port 31330 --initial_peers "$INITIAL_PEERS" --token "$HUGGINGFACE_HUB_TOKEN" --announce_maddrs /ip4/$WORKER_PUBLIC_IP/tcp/31330 --balance_quality ${BALANCE_QUALITY:-0.3}
+      python -m petals.cli.run_server "$MODEL_ID" --port ${PORT:-31330} --initial_peers "$INITIAL_PEERS" --token "$HUGGINGFACE_HUB_TOKEN" --announce_maddrs /ip4/$WORKER_PUBLIC_IP/tcp/${PORT:-31330} --balance_quality ${BALANCE_QUALITY:-0.3}
       "
     ports:
       - "31330:31330"
