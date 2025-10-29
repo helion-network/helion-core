@@ -10,13 +10,15 @@ networks:
 services:
   # -------------------- GPU WORKER --------------------
   worker:
-    image: learningathome/petals:main
+    build:
+      context: ../..
+      dockerfile: Dockerfile
     container_name: petals-worker
     # Windows Compose requires a LIST for GPUs; 'ipc: host' is not supported on Windows
     gpus:
       - count: all
     env_file:
-      - ../.env
+      - ./.env
     environment:
       MODEL_ID: ${MODEL_ID}
       WORKER_PUBLIC_IP: ${WORKER_PUBLIC_IP}
