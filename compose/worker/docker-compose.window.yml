@@ -46,5 +46,6 @@ services:
       - "${PORT:-31330}:${PORT:-31330}"
     volumes:
       - petals-cache:/cache
+      - ./config.yml:/home/petals/config.yml:ro
     # networks: [petals-net]
     # restart: unless-stopped
