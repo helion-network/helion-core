@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from transformers import AutoTokenizer, TextIteratorStreamer
-from petals import AutoDistributedModelForCausalLM
+from helion import AutoDistributedModelForCausalLM
 # import httpx
 
 
@@ -36,7 +36,7 @@ if HF_TOKEN:
 else:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
-# Initialize Petals distributed model with token if provided
+# Initialize Helion distributed model with token if provided
 _model_kwargs: Dict[str, Any] = {"initial_peers": INITIAL_PEERS}
 if HF_TOKEN:
     try:
@@ -47,7 +47,7 @@ else:
     model = AutoDistributedModelForCausalLM.from_pretrained(MODEL_ID, **_model_kwargs)
 
 
-app = FastAPI(title="OpenAI-compatible API over Petals")
+app = FastAPI(title="OpenAI-compatible API over Helion")
 
 
 # --------- Helpers ---------
@@ -58,7 +58,7 @@ _last_route_parsed: Optional[List[Dict[str, Any]]] = None
 
 def _parse_route_from_text(text: str) -> Optional[List[Dict[str, Any]]]:
     """
-    Best-effort parser for route lines logged by Petals. Handles tuple-like segments
+    Best-effort parser for route lines logged by Helion. Handles tuple-like segments
     such as (peer_id, start, end) and simple "peer:start-end" tokens.
     Returns a list of dicts or None if nothing could be parsed.
     """
@@ -111,11 +111,11 @@ class _RouteCaptureHandler(logging.Handler):
                     _last_route_parsed = parsed
 
 
-# Attach the handler to Petals loggers (fallback to root if unavailable)
+# Attach the handler to Helion loggers (fallback to root if unavailable)
 try:
     _route_handler = _RouteCaptureHandler(level=logging.INFO)
-    logging.getLogger("petals").addHandler(_route_handler)
-    logging.getLogger("petals").setLevel(min(logging.getLogger("petals").level or logging.INFO, logging.INFO))
+    logging.getLogger("helion").addHandler(_route_handler)
+    logging.getLogger("helion").setLevel(min(logging.getLogger("helion").level or logging.INFO, logging.INFO))
 except Exception:
     logging.getLogger().addHandler(_route_handler)
 
@@ -140,13 +140,13 @@ def _sanitize_jsonable(obj: Any):
 
 def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
     """
-    Best-effort introspection of the last route used by Petals to execute the model.
+    Best-effort introspection of the last route used by Helion to execute the model.
     Returns a list of {peer_id, start, end} if available, otherwise None.
-    This relies on internal attributes that may differ across Petals versions and is fully optional.
+    This relies on internal attributes that may differ across Helion versions and is fully optional.
     """
     # Defensive: never raise from here
     try:
-        # Common potential locations for the last/active route in Petals internals
+        # Common potential locations for the last/active route in Helion internals
         candidates: List[Any] = []
 
         # e.g., model.router.last_route

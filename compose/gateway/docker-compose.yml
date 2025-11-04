@@ -1,10 +1,10 @@
 version: "3.9"
 
 # Volumes:
-# - petals-cache: shared model cache (/cache) to avoid re-downloading weights
+# - helion-cache: shared model cache (/cache) to avoid re-downloading weights
 # - dht-state: stores the DHT identity key so the /p2p/<peer_id> stays stable
 volumes:
-  petals-cache:
+  helion-cache:
   dht-state:
 
 networks:

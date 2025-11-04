@@ -1,6 +1,6 @@
 FROM nvcr.io/nvidia/cuda:11.8.0-devel-ubuntu22.04
 LABEL maintainer="bigscience-workshop"
-LABEL repository="petals"
+LABEL repository="helion"
 
 WORKDIR /home
 # Set en_US.UTF-8 locale by default
@@ -30,8 +30,8 @@ RUN conda install -y python~=3.10.12 pip && \
 VOLUME /cache
 ENV PETALS_CACHE=/cache
 
-COPY . petals/
-RUN pip install --no-cache-dir -e petals
+COPY . helion/
+RUN pip install --no-cache-dir -e helion
 
-WORKDIR /home/petals/
+WORKDIR /home/helion/
 CMD bash

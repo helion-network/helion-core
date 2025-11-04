@@ -1,11 +1,11 @@
 from transformers import AutoTokenizer
-from petals import AutoDistributedModelForCausalLM
+from helion import AutoDistributedModelForCausalLM
 
 INITIAL_PEERS = [
     "/ip4/192.168.1.90/tcp/31337/p2p/QmdkaJqyUt7d8j6yNdstkvPLcsRHR9rvzvNy1wrvoKPgYV",
 ]
 
-# Choose any model available at https://health.petals.dev
+# Choose any model available at https://health.helion.dev
 model_name = "stabilityai/StableBeluga2"
 
 # Connect to a distributed network hosting model layers

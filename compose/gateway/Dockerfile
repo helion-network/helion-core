@@ -1,5 +1,5 @@
-# Use the official Petals image to ensure compatible Torch/Hivemind versions
-FROM learningathome/petals:main
+# Use the official Helion image to ensure compatible Torch/Hivemind versions
+FROM helionnetwork/helion:main
 
 ENV PYTHONUNBUFFERED=1
 

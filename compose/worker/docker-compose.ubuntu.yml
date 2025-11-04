@@ -1,7 +1,7 @@
 # Volumes:
-# - petals-cache: shared model cache (/cache) to avoid re-downloading weights
+# - helion-cache: shared model cache (/cache) to avoid re-downloading weights
 volumes:
-  petals-cache:
+  helion-cache:
 
 networks:
   petals-net:
@@ -24,11 +24,11 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     command: >
       bash -lc "
-      python -m petals.cli.run_server -c /home/petals/config.yml
+      python -m helion.cli.run_server -c /home/helion/config.yml
     ports:
       - "${PORT:-31330}:${PORT:-31330}"
     volumes:
-      - petals-cache:/cache
-      - ./config.yml:/home/petals/config.yml:ro
+      - helion-cache:/cache
+      - ./config.yml:/home/helion/config.yml:ro
     # networks: [petals-net]
     restart: unless-stopped

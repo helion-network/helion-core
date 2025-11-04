@@ -51,7 +51,7 @@ jobs:
 
           # [Step 1] Set up a tiny test swarm (see https://github.com/bigscience-workshop/petals/wiki/Launch-your-own-swarm)
 
-          python -m petals.cli.run_dht \
+          python -m helion.cli.run_dht \
             --identity_path tests/bootstrap.id --host_maddrs /ip4/127.0.0.1/tcp/31337 &> bootstrap.log &
           BOOTSTRAP_PID=$!
 
@@ -60,7 +60,7 @@ jobs:
 
           until [ -s bootstrap.log ]; do sleep 5; done  # wait for DHT init
 
-          export RUN_SERVER="python -m petals.cli.run_server $MODEL_NAME \
+          export RUN_SERVER="python -m helion.cli.run_server $MODEL_NAME \
             --device cpu --torch_dtype float32 --initial_peers $INITIAL_PEERS"
           export TENSOR_PARALLEL_ARGS="${{ matrix.model == 'bigscience/bloom-560m' && '--tensor_parallel_devices cpu cpu' || '' }}"
 

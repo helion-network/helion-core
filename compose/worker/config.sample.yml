@@ -39,5 +39,5 @@ throughput: "auto"               # or: "eval", "dry_run", or a float like 1.5
 token: true                      # use HF CLI token; or set a string token instead
 adapters: []                     # list of pre-loaded LoRA adapters
 stats_report_interval: 60
-identity_path: "/home/user/.config/petals/identity.bin"
+identity_path: "/home/user/.config/helion/identity.bin"
 custom_module_path: "/home/user/custom_modules.py"
