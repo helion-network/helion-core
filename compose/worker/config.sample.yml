@@ -1,0 +1,43 @@
+# config.yml
+converted_model_name_or_path: "/path/to/converted/model"  # from cli/convert_model.py
+public_name: "my-gpu-node-1"
+
+# Networking (simple way)
+port: 31337
+public_ip: "203.0.113.10"        # requires a fixed non-zero port
+# OR, use explicit multiaddrs instead of port/public_ip:
+# host_maddrs:
+#   - "/ip4/0.0.0.0/tcp/31337"
+#   - "/ip6/::/tcp/31337"
+# announce_maddrs:
+#   - "/ip4/203.0.113.10/tcp/31337"
+
+# Swarm
+# initial_peers: ["/dns4/..." ]  # default connects to public swarm
+# new_swarm: true                # uncomment to start a private swarm
+
+# Model/compute
+num_blocks: 2
+device: "cuda:0"
+torch_dtype: "auto"              # or: float16, bfloat16, float32
+quant_type: "int8"               # or: nf4, none
+tensor_parallel_devices: ["cuda:0", "cuda:1"]
+
+# Caching
+cache_dir: "/var/cache/petals"
+max_disk_space: "50GB"
+
+# Limits and timeouts
+max_batch_size: 8192
+attn_cache_tokens: 16384
+request_timeout: 180
+session_timeout: 1800
+step_timeout: 300
+
+# Misc
+throughput: "auto"               # or: "eval", "dry_run", or a float like 1.5
+token: true                      # use HF CLI token; or set a string token instead
+adapters: []                     # list of pre-loaded LoRA adapters
+stats_report_interval: 60
+identity_path: "/home/user/.config/petals/identity.bin"
+custom_module_path: "/home/user/custom_modules.py"
