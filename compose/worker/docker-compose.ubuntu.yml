@@ -20,28 +20,11 @@ services:
     env_file:
       - ./.env
     environment:
-      MODEL_ID: ${MODEL_ID}
-      WORKER_PUBLIC_IP: ${WORKER_PUBLIC_IP}
-      INITIAL_PEERS: ${INITIAL_PEERS}
-      HUGGINGFACE_HUB_TOKEN: ${HUGGINGFACE_HUB_TOKEN}
-      PORT: ${PORT}
-      BALANCE_QUALITY: ${BALANCE_QUALITY}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     command: >
       bash -lc "
-      if [ -z \"$WORKER_PUBLIC_IP\" ]; then
-        echo 'ERROR: Set WORKER_PUBLIC_IP to your worker public IP or DNS'; exit 1;
-      fi;
-      if [ -z \"$INITIAL_PEERS\" ]; then
-        echo 'ERROR: Set INITIAL_PEERS to DHT multiaddr(s) like /ip4/203.0.113.10/tcp/31337/p2p/12D3Koo...'; exit 1;
-      fi;
-      if [ -z \"$HUGGINGFACE_HUB_TOKEN\" ]; then
-        echo 'ERROR: Set HUGGINGFACE_HUB_TOKEN to Hugging Face token'; exit 1;
-      fi;
-      echo \"Running Petals worker with model: $MODEL_ID, public IP: $WORKER_PUBLIC_IP, initial peers: $INITIAL_PEERS, Hugging Face token: $HUGGINGFACE_HUB_TOKEN\";
-      python -m petals.cli.run_server "$MODEL_ID" --port ${PORT:-31330} --initial_peers "$INITIAL_PEERS" --token "$HUGGINGFACE_HUB_TOKEN" --announce_maddrs /ip4/$WORKER_PUBLIC_IP/tcp/${PORT:-31330} --balance_quality ${BALANCE_QUALITY:-0.3}
-      "
+      python -m petals.cli.run_server -c /home/petals/config.yml
     ports:
       - "${PORT:-31330}:${PORT:-31330}"
     volumes:
