@@ -18,6 +18,8 @@ from helion import AutoDistributedModelForCausalLM
 
 # --------- Model bootstrap ---------
 MODEL_ID = os.environ.get("MODEL_ID", "meta-llama/Llama-3.2-1B-Instruct")
+ALLOWED_MODELS_ENV = os.environ.get("ALLOWED_MODELS", "").strip()
+ALLOWED_MODELS: List[str] = [m.strip() for m in ALLOWED_MODELS_ENV.split(",") if m.strip()] or [MODEL_ID]
 _initial_peers_env = os.environ.get("INITIAL_PEERS", "").strip()
 INITIAL_PEERS: Optional[List[str]] = None
 if _initial_peers_env:
@@ -27,24 +29,33 @@ if _initial_peers_env:
 HF_TOKEN = os.environ.get("HUGGINGFACE_HUB_TOKEN")
 VALIDATOR_URL = os.environ.get("VALIDATOR_URL")
 
-# Initialize tokenizer with token fallback (supports both `token` and legacy `use_auth_token`)
-if HF_TOKEN:
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=HF_TOKEN)
-    except TypeError:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_auth_token=HF_TOKEN)
-else:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+# Initialize and preload all allowed models/tokenizers
+TOKENIZERS: Dict[str, AutoTokenizer] = {}
+MODELS: Dict[str, AutoDistributedModelForCausalLM] = {}
 
-# Initialize Helion distributed model with token if provided
 _model_kwargs: Dict[str, Any] = {"initial_peers": INITIAL_PEERS}
-if HF_TOKEN:
-    try:
-        model = AutoDistributedModelForCausalLM.from_pretrained(MODEL_ID, token=HF_TOKEN, **_model_kwargs)
-    except TypeError:
-        model = AutoDistributedModelForCausalLM.from_pretrained(MODEL_ID, use_auth_token=HF_TOKEN, **_model_kwargs)
-else:
-    model = AutoDistributedModelForCausalLM.from_pretrained(MODEL_ID, **_model_kwargs)
+for _mid in ALLOWED_MODELS:
+    # Tokenizer with token fallback (supports both `token` and legacy `use_auth_token`)
+    if HF_TOKEN:
+        try:
+            _tok = AutoTokenizer.from_pretrained(_mid, token=HF_TOKEN)
+        except TypeError:
+            _tok = AutoTokenizer.from_pretrained(_mid, use_auth_token=HF_TOKEN)
+    else:
+        _tok = AutoTokenizer.from_pretrained(_mid)
+    TOKENIZERS[_mid] = _tok
+
+    # Model with token fallback
+    if HF_TOKEN:
+        try:
+            _mdl = AutoDistributedModelForCausalLM.from_pretrained(_mid, token=HF_TOKEN, **_model_kwargs)
+        except TypeError:
+            _mdl = AutoDistributedModelForCausalLM.from_pretrained(_mid, use_auth_token=HF_TOKEN, **_model_kwargs)
+    else:
+        _mdl = AutoDistributedModelForCausalLM.from_pretrained(_mid, **_model_kwargs)
+    MODELS[_mid] = _mdl
+
+DEFAULT_MODEL_ID = ALLOWED_MODELS[0]
 
 
 app = FastAPI(title="OpenAI-compatible API over Helion")
@@ -138,7 +149,7 @@ def _sanitize_jsonable(obj: Any):
         pass
     return obj
 
-def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
+def _try_get_worker_chain(selected_model) -> Optional[List[Dict[str, Any]]]:
     """
     Best-effort introspection of the last route used by Helion to execute the model.
     Returns a list of {peer_id, start, end} if available, otherwise None.
@@ -150,7 +161,7 @@ def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
         candidates: List[Any] = []
 
         # e.g., model.router.last_route
-        router = getattr(model, "router", None)
+        router = getattr(selected_model, "router", None)
         if router is not None:
             candidates.append(getattr(router, "last_route", None))
             # Sometimes a cache object keeps the last good route
@@ -159,10 +170,10 @@ def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
                 candidates.append(getattr(route_cache, "last_good", None))
 
         # e.g., model.last_route
-        candidates.append(getattr(model, "last_route", None))
+        candidates.append(getattr(selected_model, "last_route", None))
 
         # Try to reach RemoteSequenceManager and its stored last route
-        transformer = getattr(model, "transformer", None)
+        transformer = getattr(selected_model, "transformer", None)
         h = getattr(transformer, "h", None) if transformer is not None else None
         seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
         if seq_mgr is not None:
@@ -172,7 +183,7 @@ def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
             candidates.append(getattr(seq_mgr, "last_route", None))
 
         # e.g., model.client.last_route or model._client.last_route
-        client = getattr(model, "client", None) or getattr(model, "_client", None)
+        client = getattr(selected_model, "client", None) or getattr(selected_model, "_client", None)
         if client is not None:
             candidates.append(getattr(client, "last_route", None))
             runtime = getattr(client, "runtime", None)
@@ -184,7 +195,7 @@ def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
         if route is None:
             # As a last resort, try computing a route now via the sequence manager
             try:
-                transformer = getattr(model, "transformer", None)
+                transformer = getattr(selected_model, "transformer", None)
                 h = getattr(transformer, "h", None) if transformer is not None else None
                 seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
                 if seq_mgr is not None:
@@ -273,12 +284,12 @@ def _try_get_worker_chain() -> Optional[List[Dict[str, Any]]]:
         pass
     return None
 
-def _try_get_route_repr() -> Optional[str]:
+def _try_get_route_repr(selected_model) -> Optional[str]:
     """
     Best-effort retrieval of a human-readable route string from the sequence manager or captured logs.
     """
     try:
-        transformer = getattr(model, "transformer", None)
+        transformer = getattr(selected_model, "transformer", None)
         h = getattr(transformer, "h", None) if transformer is not None else None
         seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
         seq_state = getattr(seq_mgr, "state", None) if seq_mgr is not None else None
@@ -319,6 +330,8 @@ def iterate_chat_chunks(
     temperature: float,
     top_p: float,
     model_name: str,
+    tokenizer,
+    model,
 ) -> Iterable[bytes]:
     created = int(time.time())
     req_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -387,12 +400,8 @@ def list_models():
     return {
         "object": "list",
         "data": [
-            {
-                "id": MODEL_ID,
-                "object": "model",
-                "created": 0,
-                "owned_by": "petals",
-            }
+            {"id": mid, "object": "model", "created": 0, "owned_by": "petals"}
+            for mid in ALLOWED_MODELS
         ],
     }
 
@@ -406,21 +415,35 @@ async def chat_completions(request: Request):
     max_tokens = int(body.get("max_tokens", 5000))
     temperature = float(body.get("temperature", 0.7))
     top_p = float(body.get("top_p", 0.95))
+    requested_model: Optional[str] = body.get("model") or None
+
+    # Select model
+    model_id = requested_model or DEFAULT_MODEL_ID
+    if model_id not in ALLOWED_MODELS:
+        return JSONResponse(
+            {
+                "error": "Model not allowed",
+                "allowed_models": ALLOWED_MODELS,
+            },
+            status_code=400,
+        )
+    selected_tokenizer = TOKENIZERS[model_id]
+    selected_model = MODELS[model_id]
 
     # Build inputs using a chat template if available
-    if hasattr(tokenizer, "apply_chat_template"):
-        inputs = tokenizer.apply_chat_template(
+    if hasattr(selected_tokenizer, "apply_chat_template"):
+        inputs = selected_tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
             return_tensors="pt",
         )
     else:
         prompt = build_prompt_from_messages(messages, tools)
-        inputs = tokenizer(prompt, return_tensors="pt")["input_ids"]
+        inputs = selected_tokenizer(prompt, return_tensors="pt")["input_ids"]
 
     # Best-effort: proactively compute a route to make it available for response metadata
     try:
-        transformer = getattr(model, "transformer", None)
+        transformer = getattr(selected_model, "transformer", None)
         h = getattr(transformer, "h", None) if transformer is not None else None
         seq_mgr = getattr(h, "sequence_manager", None) if h is not None else None
         if seq_mgr is not None:
@@ -437,13 +460,15 @@ async def chat_completions(request: Request):
                 max_new_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                model_name=MODEL_ID,
+                model_name=model_id,
+                tokenizer=selected_tokenizer,
+                model=selected_model,
             ),
             media_type="text/event-stream",
         )
 
     # Non-streaming: generate full text
-    outputs = model.generate(
+    outputs = selected_model.generate(
         inputs,
         max_new_tokens=max_tokens,
         do_sample=temperature > 0.0,
@@ -451,9 +476,9 @@ async def chat_completions(request: Request):
         top_p=top_p,
         repetition_penalty=1.05,
     )
-    text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    text = selected_tokenizer.decode(outputs[0], skip_special_tokens=True)
     # Extract only the assistant completion if using the simple prompt builder
-    if not hasattr(tokenizer, "apply_chat_template") and "assistant:" in text:
+    if not hasattr(selected_tokenizer, "apply_chat_template") and "assistant:" in text:
         text = text.split("assistant:")[-1].lstrip()
 
     # Optional: call external validator if a payload is provided and validator URL is configured
@@ -474,7 +499,7 @@ async def chat_completions(request: Request):
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": MODEL_ID,
+        "model": model_id,
         "choices": [
             {
                 "index": 0,
@@ -485,10 +510,10 @@ async def chat_completions(request: Request):
         "usage": None,
     }
     # Best-effort: include both worker chain and route text independently
-    worker_chain = _try_get_worker_chain()
+    worker_chain = _try_get_worker_chain(selected_model)
     if worker_chain:
         resp["worker_chain"] = worker_chain
-    route_repr = _try_get_route_repr()
+    route_repr = _try_get_route_repr(selected_model)
     if route_repr:
         resp["route_repr"] = route_repr
     # if validation_result is not None:

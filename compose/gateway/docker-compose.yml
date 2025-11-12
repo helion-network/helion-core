@@ -21,6 +21,7 @@ services:
       - ./.env
     environment:
       # Model to serve (pick one that fits your GPU; default is tiny for smoke testing)
+      ALLOWED_MODELS: ${ALLOWED_MODELS}
       MODEL_ID: ${MODEL_ID}
       # Public IP/DNS of THIS worker host (no port)
       WORKER_PUBLIC_IP: ${WORKER_PUBLIC_IP}
