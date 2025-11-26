@@ -64,6 +64,7 @@ class OptimizedLlamaAttention(LlamaAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         assert not output_attentions
         if position_ids is None:
@@ -100,8 +101,14 @@ class OptimizedLlamaAttention(LlamaAttention):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        cos, sin = self.rotary_emb(value_states, position_ids)
-        cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
+        # HF>=4.45: Use externally provided position embeddings if available, otherwise compute internally
+        if position_embeddings is not None:
+            cos, sin = position_embeddings
+            cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
+        else:
+            # Fallback for legacy callers
+            cos, sin = self.rotary_emb(value_states, position_ids)
+            cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
 
         if q_len == 1 and torch.is_inference_mode_enabled() and hidden_states.device.type == "cuda":
             query_states, key_states = self._optimized_apply_rotary(query_states, key_states, cos, sin)
@@ -177,6 +184,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -191,6 +199,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):
                 If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+            position_embeddings (`Tuple(torch.Tensor, torch.Tensor)`, *optional*): externally computed position embeddings (cos, sin)
         """
 
         residual = hidden_states
@@ -209,6 +218,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
+            position_embeddings=position_embeddings,
             **kwargs,
         )
 
@@ -262,6 +272,23 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
 
         assert position_ids is None
 
+        # Compute position_ids for position embeddings
+        position_ids = torch.arange(
+            past_key_values_length, past_key_values_length + seq_length, device=hidden_states.device
+        ).unsqueeze(0)
+
+        # HF>=4.45: Compute position embeddings externally
+        # Create a dummy tensor with the shape that rotary_emb expects (batch_size, num_key_value_heads, seq_length, head_dim)
+        # The rotary_emb only uses the shape, not the actual values
+        num_kv_heads = self._get_num_kv_heads()
+        head_dim = getattr(self.self_attn, "head_dim", self.config.hidden_size // self.config.num_attention_heads)
+        dummy_value_states = torch.zeros(
+            (batch_size, num_kv_heads, seq_length, head_dim),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        position_embeddings = self.self_attn.rotary_emb(dummy_value_states, position_ids)
+
         # embed positions
         if attention_mask is None:
             attention_mask = torch.ones(
@@ -281,6 +308,7 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
             position_ids=position_ids,
             past_key_value=past_key_value,
             use_cache=use_cache,
+            position_embeddings=position_embeddings,
             **kwargs,
         )
 
