@@ -130,7 +130,16 @@ def make_tensor_parallel(
     for tp_shard in tp_block.module_shards:
         for submodule in tp_shard.modules():
             if isinstance(submodule, model_config.attn_class):
-                total_heads += submodule.num_heads
+                heads = getattr(submodule, "num_heads", None)
+                if heads is None:
+                    heads = getattr(submodule, "num_attention_heads", None)
+                if heads is None:
+                    heads = getattr(model_config, "num_attention_heads", None)
+                if heads is None:
+                    raise AttributeError(
+                        f"Cannot determine number of attention heads for {type(submodule).__name__}"
+                    )
+                total_heads += heads
     assert total_heads == model_config.num_attention_heads
     return tp_block
 

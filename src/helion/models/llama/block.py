@@ -16,6 +16,7 @@ from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
     LlamaMLP,
     LlamaRMSNorm,
+    LlamaRotaryEmbedding,
     repeat_kv,
     rotate_half,
 )
@@ -33,6 +34,19 @@ class OptimizedLlamaAttention(LlamaAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._rotary_graph = None
+        if not hasattr(self, "rotary_emb") or self.rotary_emb is None:
+            # HF>=4.45 expects position embeddings to be passed externally; keep rotary_emb for legacy callers
+            # Create without device to avoid meta tensor issues during initialization; will be moved with module
+            device = self.q_proj.weight.device if self.q_proj.weight.device.type != "meta" else None
+            self.rotary_emb = LlamaRotaryEmbedding(self.config, device=device)
+        if not hasattr(self, "num_heads"):
+            self.num_heads = self.config.num_attention_heads
+        if not hasattr(self, "num_key_value_heads"):
+            self.num_key_value_heads = getattr(
+                self.config, "num_key_value_heads", self.config.num_attention_heads // self.config.num_key_value_groups
+            )
+        if not hasattr(self, "hidden_size"):
+            self.hidden_size = self.config.hidden_size
 
     def _optimized_apply_rotary(self, query_states, key_states, cos, sin):
         if self._rotary_graph is None:
@@ -234,6 +248,8 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         batch_size, seq_length, _ = hidden_states.shape
+        if not hasattr(self, "config"):
+            self.config = self.self_attn.config
 
         seq_length_with_past = seq_length
         past_key_values_length = 0
@@ -282,9 +298,8 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
     ) -> Tuple[torch.Tensor]:
         key_states, value_states = key_value
         key_states = key_states.permute(0, 2, 1)
-        key_states = key_states.view(
-            batch_size, self.self_attn.num_key_value_heads, seq_length, self.self_attn.head_dim
-        )
+        num_kv_heads = self._get_num_kv_heads()
+        key_states = key_states.view(batch_size, num_kv_heads, seq_length, self.self_attn.head_dim)
         value_states = value_states.view(*key_states.shape)
         return (key_states, value_states)
 
@@ -292,9 +307,22 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
         self, key_value: Tuple[torch.Tensor], batch_size: int, seq_length: int
     ) -> Tuple[torch.Tensor]:
         key_states, value_states = key_value
-        value_states = value_states.view(
-            batch_size * self.self_attn.num_key_value_heads, seq_length, self.self_attn.head_dim
-        )
+        num_kv_heads = self._get_num_kv_heads()
+        value_states = value_states.view(batch_size * num_kv_heads, seq_length, self.self_attn.head_dim)
         key_states = key_states.view(*value_states.shape)
         key_states = key_states.permute(0, 2, 1)
         return (key_states, value_states)
+
+    def _get_num_kv_heads(self) -> int:
+        num_kv_heads = getattr(self.self_attn, "num_key_value_heads", None)
+        if num_kv_heads is not None:
+            return num_kv_heads
+        num_groups = getattr(self.self_attn, "num_key_value_groups", 1)
+        num_heads = getattr(
+            self.self_attn,
+            "num_attention_heads",
+            getattr(self.self_attn, "num_heads", getattr(self.config, "num_attention_heads", None)),
+        )
+        if num_heads is None:
+            raise AttributeError("Unable to resolve number of attention heads for Llama attention")
+        return max(1, num_heads // max(1, num_groups))

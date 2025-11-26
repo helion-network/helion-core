@@ -68,7 +68,16 @@ class TransformerBackend(ModuleBackend):
         for shard in self.module.module_shards:
             for submodule in shard.modules():
                 if isinstance(submodule, config.attn_class):
-                    self.shard_num_heads.append(submodule.num_heads)
+                    heads = getattr(submodule, "num_heads", None)
+                    if heads is None:
+                        heads = getattr(submodule, "num_attention_heads", None)
+                    if heads is None:
+                        heads = getattr(config, "num_attention_heads", None)
+                    if heads is None:
+                        raise AttributeError(
+                            f"Cannot determine number of attention heads for {type(submodule).__name__}"
+                        )
+                    self.shard_num_heads.append(heads)
         assert len(self.shard_num_heads) == len(self.module.devices)
         assert sum(self.shard_num_heads) == config.num_attention_heads
 

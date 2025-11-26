@@ -128,3 +128,12 @@ dmypy.json
 .pyre/
 
 .idea/
+
+# Config file
+compose/worker/config.yml
+
+# Identity cache
+compose/worker/identity/
+
+# Model cache
+compose/worker/helion-cache/

@@ -28,7 +28,7 @@ services:
     ports:
       - "${PORT:-31330}:${PORT:-31330}"
     volumes:
-      - helion-cache:/cache
+      - ./helion-cache:/cache
       - ./config.yml:/home/helion/config.yml:ro
       - ./identity:/home/user/.config/helion
     # networks: [petals-net]

@@ -9,13 +9,13 @@ import torch.nn as nn
 import transformers
 from accelerate import init_empty_weights
 from hivemind.utils.logging import get_logger
-from huggingface_hub import HfFileSystem, get_hf_file_metadata, hf_hub_url
+from huggingface_hub import HfFileSystem, get_hf_file_metadata, hf_hub_download, hf_hub_url
+from huggingface_hub.utils import LocalEntryNotFoundError
 from peft.config import PeftConfig
 from peft.tuners import lora
 from peft.utils import CONFIG_NAME, SAFETENSORS_WEIGHTS_NAME
 from safetensors import safe_open
 from safetensors.torch import load_file
-from transformers.utils import get_file_from_repo
 
 from helion.server.block_utils import get_model_block, resolve_block_dtype
 from helion.utils.convert_block import QuantType
@@ -26,6 +26,28 @@ logger = get_logger(__name__)
 
 
 COMMON_LAYERS_PATTERN = ["layers", "h", "block", "blocks", "layer"]
+
+
+def _hf_hub_download_or_none(
+    repo_id: str,
+    filename: str,
+    *,
+    revision: Optional[str] = None,
+    token: Optional[Union[str, bool]] = None,
+    cache_dir: Optional[str] = None,
+    local_files_only: bool = False,
+):
+    try:
+        return hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            revision=revision,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+    except LocalEntryNotFoundError:
+        return None
 
 
 def check_peft_repository(repo_id: str) -> bool:
@@ -56,12 +78,12 @@ def get_adapter_from_repo(
     token: Optional[Union[str, bool]] = None,
     **kwargs,
 ):
-    config_path = get_file_from_repo(repo_id, CONFIG_NAME, use_auth_token=token, **kwargs)
+    config_path = _hf_hub_download_or_none(repo_id, CONFIG_NAME, token=token, **kwargs)
     if config_path is None:
         raise RuntimeError(f"File {CONFIG_NAME} does not exist in repo {repo_id}")
     config = PeftConfig.from_json_file(config_path)
 
-    weight_path = get_file_from_repo(repo_id, SAFETENSORS_WEIGHTS_NAME, use_auth_token=token, **kwargs)
+    weight_path = _hf_hub_download_or_none(repo_id, SAFETENSORS_WEIGHTS_NAME, token=token, **kwargs)
     if weight_path is None:
         raise RuntimeError(f"File {SAFETENSORS_WEIGHTS_NAME} does not exist in repo {repo_id}")
     if block_idx is None:

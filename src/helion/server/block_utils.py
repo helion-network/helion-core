@@ -1,3 +1,4 @@
+import inspect
 from typing import Optional, Union
 
 import torch
@@ -59,7 +60,17 @@ def get_model_block(config, layer_idx: int = 0):
     kwargs argument **only** is necessary for specific classes, like Mixtral.
     They will not be passed to other block constructors.
     """
+    if hasattr(config, "_attn_implementation"):
+        autoset = getattr(PreTrainedModel, "_autoset_attn_implementation", None)
+        if callable(autoset):
+            config = autoset(config)
+        elif getattr(config, "_attn_implementation", None) is None:
+            config._attn_implementation = "eager"
+
     if config.block_class == WrappedMixtralBlock:
-        config = PreTrainedModel._autoset_attn_implementation(config)
+        return config.block_class(config, layer_idx)
+
+    init_params = inspect.signature(config.block_class.__init__).parameters
+    if "layer_idx" in init_params:
         return config.block_class(config, layer_idx)
     return config.block_class(config)

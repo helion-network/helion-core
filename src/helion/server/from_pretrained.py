@@ -17,10 +17,10 @@ import torch.nn as nn
 from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 from hivemind.utils.logging import get_logger
-from huggingface_hub import get_hf_file_metadata, hf_hub_url
-from huggingface_hub.utils import EntryNotFoundError
+from huggingface_hub import get_hf_file_metadata, hf_hub_download, hf_hub_url
+from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
 from transformers import PretrainedConfig, PreTrainedModel
-from transformers.utils import get_file_from_repo
+from transformers.integrations.mxfp4 import convert_moe_packed_tensors
 
 from helion.constants import DTYPE_MAP
 from helion.models.mixtral import WrappedMixtralBlock
@@ -54,15 +54,54 @@ def load_pretrained_block(
     with init_empty_weights():
         block = get_model_block(config, layer_idx=block_index)
 
-    block_prefix = f"{config.block_prefix}.{block_index}."
-    state_dict = _load_state_dict_from_repo(
-        model_name,
-        block_prefix,
-        revision=revision,
-        token=token,
-        cache_dir=cache_dir,
-        max_disk_space=max_disk_space,
-    )
+    base_prefixes = config.block_prefix
+    if isinstance(base_prefixes, str):
+        base_prefixes = (base_prefixes,)
+
+    block_prefixes = []
+    for prefix in base_prefixes:
+        if prefix not in block_prefixes:
+            block_prefixes.append(prefix)
+        extended = f"model.{prefix}"
+        if not prefix.startswith("model.") and extended not in block_prefixes:
+            block_prefixes.append(extended)
+    last_error = None
+    state_dict = None
+    for prefix in block_prefixes:
+        block_prefix = f"{prefix}.{block_index}."
+        try:
+            candidate_state_dict = _load_state_dict_from_repo(
+                model_name,
+                block_prefix,
+                revision=revision,
+                token=token,
+                cache_dir=cache_dir,
+                max_disk_space=max_disk_space,
+            )
+            candidate_state_dict = _maybe_convert_mxfp4_tensors(candidate_state_dict, config, torch_dtype)
+        except Exception as exc:
+            last_error = exc
+            continue
+
+        missing = [name for name, _ in block.named_parameters() if name not in candidate_state_dict]
+        if missing:
+            for name in list(missing):
+                for suffix in (".weight", ".bias"):
+                    alt_name = name + suffix
+                    if alt_name in candidate_state_dict:
+                        candidate_state_dict[name] = candidate_state_dict.pop(alt_name)
+                        missing.remove(name)
+                        break
+
+        if missing:
+            last_error = AssertionError(f"Missing params for prefix '{prefix}': {missing[:5]}")
+            continue
+
+        state_dict = candidate_state_dict
+        break
+
+    if state_dict is None:
+        raise last_error or RuntimeError("Failed to load block weights")
 
     for param_name, _ in block.named_parameters():
         assert param_name in state_dict, f"{param_name} not in state dict"
@@ -76,6 +115,28 @@ def load_pretrained_block(
 
 
 StateDict = Dict[str, torch.Tensor]
+
+
+def _hf_hub_download_or_none(
+    model_name: str,
+    filename: str,
+    *,
+    revision: Optional[str],
+    token: Optional[Union[str, bool]],
+    cache_dir: str,
+    local_files_only: bool,
+) -> Optional[str]:
+    try:
+        return hf_hub_download(
+            repo_id=model_name,
+            filename=filename,
+            revision=revision,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+        )
+    except LocalEntryNotFoundError:
+        return None
 
 
 def _load_state_dict_from_repo(
@@ -92,10 +153,13 @@ def _load_state_dict_from_repo(
 
     index_file = _find_index_file(model_name, revision=revision, token=token, cache_dir=cache_dir)
     if index_file.endswith(".index.json"):  # Sharded model
-        path = get_file_from_repo(model_name, filename=index_file, use_auth_token=token, cache_dir=cache_dir)
-        if path is None:
-            # _find_index_file() told that a file exists but we can't get it (e.g., it just disappeared)
-            raise ValueError(f"Failed to get file {index_file}")
+        path = hf_hub_download(
+            repo_id=model_name,
+            filename=index_file,
+            revision=revision,
+            token=token,
+            cache_dir=cache_dir,
+        )
 
         with open(path) as f:
             index = json.load(f)
@@ -128,6 +192,25 @@ def _load_state_dict_from_repo(
     return state_dict
 
 
+def _maybe_convert_mxfp4_tensors(
+    state_dict: StateDict, config: PretrainedConfig, torch_dtype: torch.dtype
+) -> StateDict:
+    quant_cfg = getattr(config, "quantization_config", None) or {}
+    if quant_cfg.get("quant_method") != "mxfp4":
+        return state_dict
+
+    def convert_pair(base_name: str):
+        blocks_key = f"{base_name}_blocks"
+        scales_key = f"{base_name}_scales"
+        if blocks_key in state_dict and scales_key in state_dict:
+            dense = convert_moe_packed_tensors(state_dict.pop(blocks_key), state_dict.pop(scales_key))
+            state_dict[base_name] = dense.transpose(1, 2).contiguous().to(torch_dtype).cpu()
+
+    convert_pair("mlp.experts.gate_up_proj")
+    convert_pair("mlp.experts.down_proj")
+    return state_dict
+
+
 INDEX_FILES = ["model.safetensors.index.json", "model.safetensors", "pytorch_model.bin.index.json", "pytorch_model.bin"]
 
 
@@ -136,11 +219,11 @@ def _find_index_file(
 ) -> str:
     # If we have cached weights (e.g., Pickle from older Petals versions), reuse them
     for filename in INDEX_FILES:
-        path = get_file_from_repo(
+        path = _hf_hub_download_or_none(
             model_name,
             filename,
             revision=revision,
-            use_auth_token=token,
+            token=token,
             cache_dir=cache_dir,
             local_files_only=True,
         )
@@ -173,11 +256,11 @@ def _load_state_dict_from_repo_file(
     # First, try to find the weights locally
     try:
         with allow_cache_reads(cache_dir):
-            path = get_file_from_repo(
+            path = _hf_hub_download_or_none(
                 model_name,
                 filename,
                 revision=revision,
-                use_auth_token=token,
+                token=token,
                 cache_dir=cache_dir,
                 local_files_only=True,
             )
@@ -197,16 +280,14 @@ def _load_state_dict_from_repo_file(
                 else:
                     logger.warning(f"Failed to fetch size of file {filename} from repo {model_name}")
 
-                path = get_file_from_repo(
-                    model_name,
-                    filename,
+                path = hf_hub_download(
+                    repo_id=model_name,
+                    filename=filename,
                     revision=revision,
-                    use_auth_token=token,
+                    token=token,
                     cache_dir=cache_dir,
                     local_files_only=False,
                 )
-                if path is None:
-                    raise RuntimeError(f"File {filename} does not exist in repo {model_name}")
                 return _load_state_dict_from_local_file(path, block_prefix=block_prefix)
         except Exception as e:
             logger.warning(f"Failed to load file {filename} from HF Hub (retry in {delay:.0f} sec)", exc_info=True)

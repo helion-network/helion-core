@@ -17,8 +17,8 @@ services:
     # Windows Compose requires a LIST for GPUs; 'ipc: host' is not supported on Windows
     gpus:
       - count: all
-    env_file:
-      - ./.env
+    # env_file:
+    #   - ./.env
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -29,7 +29,7 @@ services:
     ports:
       - "${PORT:-31330}:${PORT:-31330}"
     volumes:
-      - helion-cache:/cache
+      - ./helion-cache:/cache
       - ./config.yml:/home/helion/config.yml:ro
       - ./identity:/home/user/.config/helion
     # networks: [petals-net]
