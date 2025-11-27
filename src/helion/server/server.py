@@ -70,6 +70,7 @@ class Server:
         revision: Optional[str] = None,
         cache_dir: Optional[str] = None,
         max_disk_space: Optional[int] = None,
+        gpu_memory_limit: Optional[int] = None,
         device: Optional[Union[str, torch.device]] = None,
         compression=CompressionType.NONE,
         stats_report_interval: Optional[int] = None,
@@ -211,6 +212,7 @@ class Server:
         # For disk cache
         self.cache_dir = cache_dir
         self.max_disk_space = max_disk_space
+        self.gpu_memory_limit = gpu_memory_limit
         self.adapters = adapters
 
         assert num_blocks is None or block_indices is None, "Please specify num_blocks or block_indices, not both"
@@ -295,6 +297,14 @@ class Server:
             total_memory = torch.cuda.get_device_properties(self.device).total_memory
         else:
             total_memory = psutil.virtual_memory().total
+
+        # Use gpu_memory_limit if specified, otherwise use total available memory
+        if self.gpu_memory_limit is not None:
+            if self.device.type not in ("cuda", "mps"):
+                logger.warning("--gpu_memory_limit is only applicable for GPU devices, ignoring")
+            else:
+                total_memory = min(total_memory, self.gpu_memory_limit)
+                logger.info(f"Using GPU memory limit: {self.gpu_memory_limit / (1024**3):.2f} GiB")
 
         gib = 1024**3
         # Estimate of GPU memory used in rpc_backward (2 GiB for BLOOM, proportional for other models)

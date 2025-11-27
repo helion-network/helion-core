@@ -18,7 +18,9 @@ public_ip: "203.0.113.10"        # requires a fixed non-zero port
 # new_swarm: true                # uncomment to start a private swarm
 
 # Model/compute
-num_blocks: 2
+num_blocks: 2                    # If not specified, will be calculated based on GPU memory
+gpu_memory_limit: "6GB"          # Optional: Limit GPU memory usage (e.g., "4GB", "6GB", "8GiB")
+                                 # If specified, num_blocks will be calculated based on this limit
 device: "cuda:0"
 torch_dtype: "auto"              # or: float16, bfloat16, float32
 quant_type: "int8"               # or: nf4, none

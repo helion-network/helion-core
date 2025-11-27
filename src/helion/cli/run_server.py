@@ -93,6 +93,12 @@ def main():
                              "However, this worst case is unlikely, expect the server to consume "
                              "the disk space equal to 2-4x of your GPU memory on average.")
 
+    parser.add_argument("--gpu_memory_limit", type=str, default=None,
+                        help="Limit GPU memory usage for block calculation. Example: 4GB, 6GB, 8GiB. "
+                             "If specified, the server will calculate the number of blocks based on this limit "
+                             "instead of using the full GPU memory. This allows you to reserve GPU memory for "
+                             "other processes. Default: use full GPU memory.")
+
     parser.add_argument('--device', type=str, default=None, required=False,
                         help='all blocks will use this device in torch notation; default: cuda if available else cpu')
     parser.add_argument("--torch_dtype", type=str, choices=DTYPE_MAP.keys(), default="auto",
@@ -203,6 +209,13 @@ def main():
         max_disk_space, (int, type(None))
     ), "Unrecognized value for --max_disk_space. Correct examples: 1.5GB or 1500MB or 1572864000 (bytes)"
 
+    gpu_memory_limit = args.pop("gpu_memory_limit")
+    if gpu_memory_limit is not None:
+        gpu_memory_limit = parse_size(gpu_memory_limit)
+    assert isinstance(
+        gpu_memory_limit, (int, type(None))
+    ), "Unrecognized value for --gpu_memory_limit. Correct examples: 4GB, 6GB, 8GiB"
+
     if args.pop("new_swarm"):
         args["initial_peers"] = []
 
@@ -222,6 +235,7 @@ def main():
         announce_maddrs=announce_maddrs,
         compression=compression,
         max_disk_space=max_disk_space,
+        gpu_memory_limit=gpu_memory_limit,
     )
     try:
         server.run()
