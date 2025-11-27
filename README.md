@@ -37,6 +37,65 @@ print(tokenizer.decode(outputs[0]))  # A cat sat on a mat...
 
 💬 **Any questions?** Ping us in [our Discord](https://discord.gg/KdThf2bWVU)!
 
+## 🛠️ Local Development
+
+To set up Helion for local development:
+
+### Prerequisites
+
+- Python 3.8 or higher
+- pip
+- (Optional) CUDA-capable GPU with CUDA 11.8 for GPU acceleration
+
+### Installation Steps
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/helion-network/helion-core.git
+   cd helion-core
+   ```
+
+2. **Install PyTorch:**
+   
+   For CUDA 11.8:
+   ```bash
+   pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cu118
+   ```
+   
+   For CPU-only:
+   ```bash
+   pip install torch==2.1.2
+   ```
+
+3. **Install dependencies:**
+   ```bash
+   pip install -r src/requirements.txt
+   ```
+
+4. **Install Helion in development mode:**
+   ```bash
+   pip install -e .
+   ```
+
+5. **Verify installation:**
+   ```bash
+   python -c "import helion; print(helion.__version__)"
+   ```
+
+### Running Tests
+
+```bash
+pytest tests/
+```
+
+### Development Workflow
+
+- Make your changes to the codebase
+- Run tests to ensure everything works: `pytest tests/`
+- Install in development mode after changes: `pip install -e .`
+
+For more information, see the [contributing guide](https://github.com/helion-network/helion-core/wiki/FAQ:-Frequently-asked-questions#contributing).
+
 ## Connect your GPU and increase Helion capacity
 
 Helion is a community-run system &mdash; we rely on people sharing their GPUs. You can help serving one of the [available models](https://health.helion.dev) or host a new model from 🤗 [Model Hub](https://huggingface.co/models)!
@@ -122,7 +181,17 @@ Please see **Section 3.3** of our [paper](https://arxiv.org/pdf/2209.01188.pdf).
 
 Please see our [FAQ](https://github.com/helion-network/helion-core/wiki/FAQ:-Frequently-asked-questions#contributing) on contributing.
 
+## 📄 License
+
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+Helion is a fork of [Petals](https://github.com/bigscience-workshop/petals), a collaborative inference and fine-tuning system for large language models. We extend our gratitude to the original Petals authors and contributors for their groundbreaking work.
+
 ### 📜 Citations
+
+The following citations are for the original Petals research papers that Helion is based on:
 
 Alexander Borzunov, Dmitry Baranchuk, Tim Dettmers, Max Ryabinin, Younes Belkada, Artem Chumachenko, Pavel Samygin, and Colin Raffel.
 [Petals: Collaborative Inference and Fine-tuning of Large Models.](https://arxiv.org/abs/2209.01188)
@@ -158,8 +227,5 @@ _Advances in Neural Information Processing Systems_ 36 (2023).
 --------------------------------------------------------------------------------
 
 <p align="center">
-    This project is a part of the <a href="https://bigscience.huggingface.co/">BigScience</a> research workshop.
-</p>
-<p align="center">
-    <img src="https://petals.dev/bigscience.png" width="150">
+    Helion is a fork of <a href="https://github.com/bigscience-workshop/petals">Petals</a>, originally developed as part of the <a href="https://bigscience.huggingface.co/">BigScience</a> research workshop.
 </p>
