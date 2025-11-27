@@ -32,6 +32,8 @@ services:
     ports:
       - "31337:31337"       # expose for public peers
     volumes:
+      - ./helion-cache:/cache
+      - ./identity:/home/user/.config/helion
       - dht-state:/state
     networks: [petals-net]
     restart: unless-stopped
