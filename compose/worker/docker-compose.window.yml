@@ -10,10 +10,11 @@ networks:
 services:
   # -------------------- GPU WORKER --------------------
   worker:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    container_name: petals-worker
+    image: phongnhat19/helion:v0.0.1
+    # build:
+      # context: ../..
+      # dockerfile: Dockerfile
+    container_name: helion-worker
     # Windows Compose requires a LIST for GPUs; 'ipc: host' is not supported on Windows
     gpus:
       - count: all
@@ -27,7 +28,7 @@ services:
       python -m helion.cli.run_server -c /home/helion/config.yml
       "
     ports:
-      - "${PORT:-31330}:${PORT:-31330}"
+      - "${PORT:-31337}:31337"
     volumes:
       - ./helion-cache:/cache
       - ./config.yml:/home/helion/config.yml:ro

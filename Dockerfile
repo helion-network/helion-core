@@ -1,5 +1,5 @@
 FROM nvcr.io/nvidia/cuda:11.8.0-devel-ubuntu22.04
-LABEL maintainer="bigscience-workshop"
+LABEL maintainer="helion"
 LABEL repository="helion"
 
 WORKDIR /home

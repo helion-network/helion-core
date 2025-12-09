@@ -1,5 +1,5 @@
 # Use the official Helion image to ensure compatible Torch/Hivemind versions
-FROM helionnetwork/helion:main
+FROM phongnhat19/helion:v0.0.1
 
 ENV PYTHONUNBUFFERED=1
 

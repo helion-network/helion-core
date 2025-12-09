@@ -13,16 +13,22 @@ services:
   # -------------------- DHT BOOTSTRAP (CPU-only) --------------------
   dht:
     image: phongnhat19/helion:v0.0.1
+    # build:
+    #   context: ../..
+    #   dockerfile: Dockerfile
     container_name: helion-dht
     # IMPORTANT: Set DHT_PUBLIC_IP to your machine's public IP or DNS name (no port).
     # This ensures peers on the Internet can dial back to you.
-    # environment:
-    #   - DHT_PUBLIC_IP=${DHT_PUBLIC_IP}
-    # env_file:
-    #   - ./.env
+    environment:
+      - DHT_PUBLIC_IP=${DHT_PUBLIC_IP}
+    env_file:
+      - ./.env
     command: >
       bash -lc "
-      python -m helion.cli.run_dht --identity_path /state/bootstrap.id
+      if [ -z \"$DHT_PUBLIC_IP\" ]; then
+        echo 'ERROR: Set DHT_PUBLIC_IP to your public IP or DNS (e.g. 203.0.113.10)'; exit 1;
+      fi;
+      python -m helion.cli.run_dht --host_maddrs /ip4/0.0.0.0/tcp/31337 --identity_path /state/bootstrap.id --announce_maddrs /ip4/${DHT_PUBLIC_IP}/tcp/31337
       "
     ports:
       - "31337:31337"       # expose for public peers
