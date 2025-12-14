@@ -16,6 +16,9 @@ public_ip: "203.0.113.10"        # requires a fixed non-zero port
 # Swarm
 # initial_peers: ["/dns4/..." ]  # default connects to public swarm
 # new_swarm: true                # uncomment to start a private swarm
+# allowed_dht_nodes: []          # Optional: List of DHT node peer IDs (base58) that are allowed to make requests.
+#                                 # If empty or not specified, all nodes are allowed. Example:
+#                                 # allowed_dht_nodes: ["QmPXGhXJRDZZLRPDKSRXGnM9FiccEncxqrLjWSLZhjgKZS"]
 
 # Model/compute
 num_blocks: 2                    # If not specified, will be calculated based on GPU memory

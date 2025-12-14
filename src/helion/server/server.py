@@ -93,6 +93,7 @@ class Server:
         use_relay: bool = True,
         use_auto_relay: bool = True,
         adapters: Sequence[str] = (),
+        allowed_dht_nodes: Optional[Sequence[str]] = None,
         **kwargs,
     ):
         """Create a server with one or more bloom blocks. See run_server.py for documentation."""
@@ -271,6 +272,10 @@ class Server:
         self.mean_balance_check_period = mean_balance_check_period
         self.mean_block_selection_delay = mean_block_selection_delay
 
+        self.allowed_dht_nodes = allowed_dht_nodes if allowed_dht_nodes else []
+        if self.allowed_dht_nodes:
+            logger.info(f"Access control enabled: only allowing requests from {len(self.allowed_dht_nodes)} DHT node(s)")
+
         self.module_container = None
         self.stop = threading.Event()
 
@@ -371,6 +376,7 @@ class Server:
                 quant_type=self.quant_type,
                 tensor_parallel_devices=self.tensor_parallel_devices,
                 should_validate_reachability=self.should_validate_reachability,
+                allowed_dht_nodes=self.allowed_dht_nodes,
                 start=True,
             )
             try:
@@ -470,6 +476,7 @@ class ModuleContainer(threading.Thread):
         quant_type: QuantType,
         tensor_parallel_devices: Sequence[torch.device],
         should_validate_reachability: bool,
+        allowed_dht_nodes: Optional[Sequence[str]] = None,
         **kwargs,
     ) -> ModuleContainer:
         module_uids = [f"{dht_prefix}{UID_DELIMITER}{block_index}" for block_index in block_indices]
@@ -561,6 +568,7 @@ class ModuleContainer(threading.Thread):
             server_info=server_info,
             update_period=update_period,
             expiration=expiration,
+            allowed_dht_nodes=allowed_dht_nodes,
             **kwargs,
         )
 
@@ -579,6 +587,7 @@ class ModuleContainer(threading.Thread):
         request_timeout: float,
         session_timeout: float,
         step_timeout: float,
+        allowed_dht_nodes: Optional[Sequence[str]] = None,
         start: bool,
         **kwargs,
     ):
@@ -601,6 +610,7 @@ class ModuleContainer(threading.Thread):
                 session_timeout=session_timeout,
                 step_timeout=step_timeout,
                 quant_type=QuantType[server_info.quant_type.upper()],
+                allowed_dht_nodes=allowed_dht_nodes,
             )
             for i in range(num_handlers)
         ]

@@ -72,6 +72,7 @@ class TransformerConnectionHandler(ConnectionHandler):
         step_timeout: float,
         task_prioritizer: TaskPrioritizerBase = DummyTaskPrioritizer(),
         quant_type: QuantType,
+        allowed_dht_nodes: Optional[Sequence[str]] = None,
     ):
         super().__init__(dht, module_backends)
         for module_backend in self.module_backends.values():
@@ -90,6 +91,25 @@ class TransformerConnectionHandler(ConnectionHandler):
         self.session_timeout, self.step_timeout = session_timeout, step_timeout
         self._prioritizer = task_prioritizer
         self.quant_type = quant_type
+
+        # Convert allowed_dht_nodes from base58 strings to PeerID set for efficient lookup
+        if allowed_dht_nodes:
+            try:
+                self._allowed_peer_ids = {PeerID.from_base58(peer_id_str) for peer_id_str in allowed_dht_nodes}
+                logger.info(f"Access control enabled: allowing requests from {len(self._allowed_peer_ids)} DHT node(s)")
+            except Exception as e:
+                logger.warning(f"Failed to parse allowed_dht_nodes: {e}. Access control disabled.")
+                self._allowed_peer_ids = None
+        else:
+            self._allowed_peer_ids = None
+
+    def _check_access_control(self, context: P2PContext) -> None:
+        """Check if the requesting peer is allowed to make requests. Raises PermissionError if not allowed."""
+        if self._allowed_peer_ids is not None:
+            if context.remote_id not in self._allowed_peer_ids:
+                raise PermissionError(
+                    f"Access denied: peer {context.remote_id.to_base58()} is not in the allowed DHT nodes list"
+                )
 
     async def add_p2p_handlers(self, *args, **kwargs) -> None:
         if self._listener_task is None:
@@ -135,6 +155,7 @@ class TransformerConnectionHandler(ConnectionHandler):
         context: P2PContext,
     ) -> AsyncIterator[runtime_pb2.ExpertResponse]:
         """Compute a single step of inference using attention cache; update attention cache accordingly."""
+        self._check_access_control(context)
         async with timeout(self.session_timeout):
             try:
                 request = await asyncio.wait_for(anext(requests), self.step_timeout)
@@ -309,6 +330,7 @@ class TransformerConnectionHandler(ConnectionHandler):
 
     async def rpc_push(self, request: runtime_pb2.ExpertRequest, context: P2PContext) -> runtime_pb2.ExpertResponse:
         """Directly push activation tensors from one server to another"""
+        self._check_access_control(context)
 
         requested_uids = self._check_uids(request.uid)
         metadata = MSGPackSerializer.loads(request.metadata)
@@ -350,6 +372,7 @@ class TransformerConnectionHandler(ConnectionHandler):
             )
 
     async def rpc_forward(self, request: runtime_pb2.ExpertRequest, context: P2PContext) -> runtime_pb2.ExpertResponse:
+        self._check_access_control(context)
         async with timeout(self.request_timeout):
             # Parse request and prepare backends
             flat_inputs = [deserialize_torch_tensor(tensor) for tensor in request.tensors]
@@ -380,6 +403,7 @@ class TransformerConnectionHandler(ConnectionHandler):
     async def rpc_forward_stream(
         self, requests: AsyncIterator[runtime_pb2.ExpertRequest], context: P2PContext
     ) -> AsyncIterator[runtime_pb2.ExpertRequest]:
+        self._check_access_control(context)
         async with timeout(self.request_timeout):
             # Parse requests and prepare backends
             uid_str, flat_inputs, metadata = await self._gather_inputs(requests, context)
@@ -432,6 +456,7 @@ class TransformerConnectionHandler(ConnectionHandler):
         ]
 
     async def rpc_backward(self, request: runtime_pb2.ExpertRequest, context: P2PContext) -> runtime_pb2.ExpertResponse:
+        self._check_access_control(context)
         async with timeout(self.request_timeout):
             # Parse requests and prepare backends
             flat_tensors = [deserialize_torch_tensor(tensor) for tensor in request.tensors]
@@ -461,6 +486,7 @@ class TransformerConnectionHandler(ConnectionHandler):
     async def rpc_backward_stream(
         self, requests: AsyncIterator[runtime_pb2.ExpertRequest], context: P2PContext
     ) -> AsyncIterator[runtime_pb2.ExpertResponse]:
+        self._check_access_control(context)
         async with timeout(self.request_timeout):
             uids_header, flat_tensors, metadata = await self._gather_inputs(requests, context)
             requested_uids = self._check_uids(uids_header)
@@ -574,6 +600,7 @@ class TransformerConnectionHandler(ConnectionHandler):
 
     async def rpc_info(self, request: runtime_pb2.ExpertUID, context: P2PContext) -> runtime_pb2.ExpertInfo:
         """Return metadata about stored block uids and current load"""
+        self._check_access_control(context)
 
         backend = self.module_backends[request.uid] if request.uid else next(iter(self.module_backends.values()))
         result = {

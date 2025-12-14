@@ -170,6 +170,11 @@ def main():
     parser.add_argument("--adapters", nargs='*', default=(),
                         help="List of pre-loaded LoRA adapters that can be used for inference or training")
 
+    parser.add_argument("--allowed_dht_nodes", nargs='*', default=None,
+                        help="List of DHT node peer IDs (base58) that are allowed to make requests to this worker. "
+                             "If not specified or empty, all nodes are allowed. "
+                             "Example: --allowed_dht_nodes QmPXGhXJRDZZLRPDKSRXGnM9FiccEncxqrLjWSLZhjgKZS")
+
     # fmt:on
     args = vars(parser.parse_args())
     args.pop("config", None)
@@ -222,6 +227,11 @@ def main():
     quant_type = args.pop("quant_type")
     if quant_type is not None:
         args["quant_type"] = QuantType[quant_type.upper()]
+
+    allowed_dht_nodes = args.pop("allowed_dht_nodes")
+    if allowed_dht_nodes is None:
+        allowed_dht_nodes = []
+    args["allowed_dht_nodes"] = allowed_dht_nodes
 
     validate_version()
 
