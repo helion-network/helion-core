@@ -1,0 +1,41 @@
+# Docker Compose for CPU-only worker (Apple Silicon / ARM64)
+# Volumes:
+# - helion-cache: shared model cache (/cache) to avoid re-downloading weights
+volumes:
+  helion-cache:
+
+networks:
+  helion-net:
+    name: helion-net
+
+services:
+  # -------------------- CPU WORKER (Apple Silicon / ARM64) --------------------
+  worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.cpu.apple
+      platforms:
+        - linux/arm64
+    platform: linux/arm64
+    container_name: helion-worker-cpu
+    # No GPU configuration for CPU-only
+    env_file:
+      - ./.env
+    environment:
+      - PETALS_CACHE=/cache
+      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+    command: >
+      bash -lc "
+      python -m helion.cli.run_server -c /home/helion/config.yml
+      "
+    ports:
+      - "${PORT:-31337}:31337"
+    volumes:
+      - ./helion-cache:/cache
+      - ./config.yml:/home/helion/config.yml:ro
+      - ./identity:/home/user/.config/helion
+    networks:
+      - helion-net
+    restart: unless-stopped
+

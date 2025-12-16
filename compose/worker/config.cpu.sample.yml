@@ -1,0 +1,49 @@
+# config.yml for CPU-only worker (Apple Silicon / ARM64)
+converted_model_name_or_path: "/path/to/converted/model"  # from cli/convert_model.py
+# e.g., set to "openai/gpt-oss-20b" to host the GPT-OSS 20B release directly from Hugging Face
+public_name: "my-cpu-node-1"
+
+# Networking (simple way)
+port: 31337
+public_ip: "203.0.113.10"        # requires a fixed non-zero port
+# OR, use explicit multiaddrs instead of port/public_ip:
+# host_maddrs:
+#   - "/ip4/0.0.0.0/tcp/31337"
+#   - "/ip6/::/tcp/31337"
+# announce_maddrs:
+#   - "/ip4/203.0.113.10/tcp/31337"
+
+# Swarm
+# initial_peers: ["/dns4/..." ]  # default connects to public swarm
+# new_swarm: true                # uncomment to start a private swarm
+# allowed_dht_nodes: []          # Optional: List of DHT node peer IDs (base58) that are allowed to make requests.
+#                                 # If empty or not specified, all nodes are allowed. Example:
+#                                 # allowed_dht_nodes: ["QmPXGhXJRDZZLRPDKSRXGnM9FiccEncxqrLjWSLZhjgKZS"]
+
+# Model/compute - CPU-specific settings
+num_blocks: 1                    # CPU typically handles fewer blocks; adjust based on available RAM
+# gpu_memory_limit: "6GB"        # Not applicable for CPU
+device: "cpu"                    # Use CPU instead of CUDA
+torch_dtype: "float32"           # CPU typically uses float32 (float16/bfloat16 require GPU)
+quant_type: "none"               # Quantization (int8/nf4) requires CUDA; use "none" for CPU
+# tensor_parallel_devices: []     # Not applicable for CPU
+
+# Caching
+cache_dir: "/cache"
+max_disk_space: "50GB"
+
+# Limits and timeouts - may need to be adjusted for CPU performance
+max_batch_size: 2048              # Reduced for CPU (default 8192 may be too high)
+attn_cache_tokens: 4096           # Reduced for CPU (default 16384 may be too high)
+request_timeout: 300              # Increased timeout for slower CPU processing
+session_timeout: 1800
+step_timeout: 600                 # Increased timeout for CPU
+
+# Misc
+throughput: "auto"               # or: "eval", "dry_run", or a float like 1.5
+token: true                      # use HF CLI token; or set a string token instead
+adapters: []                     # list of pre-loaded LoRA adapters
+stats_report_interval: 60
+identity_path: "/home/user/.config/helion/identity.bin"
+custom_module_path: "/home/user/custom_modules.py"
+
