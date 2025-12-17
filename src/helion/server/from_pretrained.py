@@ -203,9 +203,11 @@ def _maybe_convert_mxfp4_tensors(
         blocks_key = f"{base_name}_blocks"
         scales_key = f"{base_name}_scales"
         if blocks_key in state_dict and scales_key in state_dict:
-            # Force conversion to happen on CPU to avoid spurious GPU allocations when running on CUDA.
-            blocks = state_dict.pop(blocks_key).cpu()
-            scales = state_dict.pop(scales_key).cpu()
+            # Force conversion to happen on CPU (some HF helpers default to the input device).
+            blocks = state_dict.pop(blocks_key)
+            scales = state_dict.pop(scales_key)
+            blocks = blocks.detach().to(device="cpu", copy=True)
+            scales = scales.detach().to(device="cpu", copy=True)
             dense = convert_moe_packed_tensors(blocks, scales)
             state_dict[base_name] = dense.transpose(1, 2).contiguous().to(torch_dtype).cpu()
 
