@@ -10,6 +10,7 @@ import json
 import time
 from contextlib import suppress
 from typing import Dict, Optional, Union
+from unittest import mock
 
 import safetensors
 import torch
@@ -208,7 +209,9 @@ def _maybe_convert_mxfp4_tensors(
             scales = state_dict.pop(scales_key)
             blocks = blocks.detach().to(device="cpu", copy=True)
             scales = scales.detach().to(device="cpu", copy=True)
-            dense = convert_moe_packed_tensors(blocks, scales)
+            # Some HF versions pick CUDA if available; patch is_available to force CPU.
+            with mock.patch("transformers.integrations.mxfp4.torch.cuda.is_available", return_value=False):
+                dense = convert_moe_packed_tensors(blocks, scales)
             state_dict[base_name] = dense.transpose(1, 2).contiguous().to(torch_dtype).cpu()
 
     convert_pair("mlp.experts.gate_up_proj")
