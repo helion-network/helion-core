@@ -203,7 +203,10 @@ def _maybe_convert_mxfp4_tensors(
         blocks_key = f"{base_name}_blocks"
         scales_key = f"{base_name}_scales"
         if blocks_key in state_dict and scales_key in state_dict:
-            dense = convert_moe_packed_tensors(state_dict.pop(blocks_key), state_dict.pop(scales_key))
+            # Force conversion to happen on CPU to avoid spurious GPU allocations when running on CUDA.
+            blocks = state_dict.pop(blocks_key).cpu()
+            scales = state_dict.pop(scales_key).cpu()
+            dense = convert_moe_packed_tensors(blocks, scales)
             state_dict[base_name] = dense.transpose(1, 2).contiguous().to(torch_dtype).cpu()
 
     convert_pair("mlp.experts.gate_up_proj")
