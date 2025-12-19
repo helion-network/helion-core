@@ -36,5 +36,21 @@ class DistributedGptOssConfig(GptOssConfig, ClientConfig, PTuneConfig, LMHeadCon
 
         if getattr(config, "pad_token_id", None) is None:
             config.pad_token_id = 0
+
+        # Ensure problematic fp32 list is cleared even if loaded from JSON
+        # Set to None (not empty tuple) to bypass transformers' validation check
+        try:
+            config._keep_in_fp32_modules = None
+            config._keep_in_fp32_modules_strict = None
+        except Exception:
+            pass
+
         return result
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # GPT-OSS has no post_attention_layernorm in the distributed stack
+        # Set to None (not empty tuple) to bypass transformers' validation check
+        self._keep_in_fp32_modules = None
+        self._keep_in_fp32_modules_strict = None
 

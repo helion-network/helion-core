@@ -3,6 +3,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from hivemind import DHT
+from hivemind import get_logger
 from transformers.modeling_outputs import MoeModelOutputWithPast, SequenceClassifierOutputWithPast
 from transformers.models.gpt_oss import GptOssForCausalLM, GptOssModel, GptOssPreTrainedModel
 
@@ -13,9 +14,16 @@ from helion.client.remote_generation import RemoteGenerationMixin, RemotePastKey
 from helion.client.remote_sequential import RemoteSequential
 from helion.models.gpt_oss.config import DistributedGptOssConfig
 
+logger = get_logger(__name__)
+
 
 class DistributedGptOssModel(FromPretrainedMixin, PTuneMixin, GptOssModel):
     """GptOssModel, but transformer layers are hosted by the swarm"""
+
+    # Transformers copies these from the *class* into the instance in PreTrainedModel.__init__.
+    # Set to None to bypass module-name validation (our distributed model does not have local blocks).
+    _keep_in_fp32_modules = None
+    _keep_in_fp32_modules_strict = None
 
     _keys_to_ignore_on_load_missing = PTuneMixin._keys_to_ignore_on_load_missing
     _keys_to_ignore_on_load_unexpected = [r"^model\.layers\."]
@@ -23,7 +31,14 @@ class DistributedGptOssModel(FromPretrainedMixin, PTuneMixin, GptOssModel):
     config_class = DistributedGptOssConfig
 
     def __init__(self, config: DistributedGptOssConfig, *, dht: Optional[DHT] = None):
+        # Set fp32 lists to None BEFORE super().__init__() calls post_init() which validates it
+        # None bypasses the validation check in transformers
+        config._keep_in_fp32_modules = None
+        config._keep_in_fp32_modules_strict = None
         num_layers, config.num_hidden_layers = config.num_hidden_layers, 0
+        # Set again right before super call as final safety
+        config._keep_in_fp32_modules = None
+        config._keep_in_fp32_modules_strict = None
         super().__init__(config)
         assert len(self.layers) == 0
         config.num_hidden_layers = num_layers
@@ -125,13 +140,25 @@ class DistributedGptOssModel(FromPretrainedMixin, PTuneMixin, GptOssModel):
 
 
 class DistributedGptOssForCausalLM(FromPretrainedMixin, RemoteGenerationMixin, GptOssForCausalLM):
+    # See note in DistributedGptOssModel: must be overridden at class-level.
+    _keep_in_fp32_modules = None
+    _keep_in_fp32_modules_strict = None
+
     _keys_to_ignore_on_load_missing = DistributedGptOssModel._keys_to_ignore_on_load_missing
     _keys_to_ignore_on_load_unexpected = DistributedGptOssModel._keys_to_ignore_on_load_unexpected
 
     config_class = DistributedGptOssConfig
 
     def __init__(self, config: DistributedGptOssConfig):
+        # Safety: set fp32 lists to None before any parent init or model creation
+        # None bypasses the validation check in transformers
+        config._keep_in_fp32_modules = None
+        config._keep_in_fp32_modules_strict = None
+
         GptOssPreTrainedModel.__init__(self, config)
+        # Set again before creating DistributedGptOssModel
+        config._keep_in_fp32_modules = None
+        config._keep_in_fp32_modules_strict = None
         self.model = DistributedGptOssModel(config)
         self.lm_head = LMHead(config)
         self.post_init()
@@ -145,12 +172,20 @@ class DistributedGptOssForCausalLM(FromPretrainedMixin, RemoteGenerationMixin, G
 
 
 class DistributedGptOssForSequenceClassification(FromPretrainedMixin, GptOssPreTrainedModel):
+    # See note in DistributedGptOssModel: must be overridden at class-level.
+    _keep_in_fp32_modules = None
+    _keep_in_fp32_modules_strict = None
+
     _keys_to_ignore_on_load_missing = DistributedGptOssModel._keys_to_ignore_on_load_missing
     _keys_to_ignore_on_load_unexpected = DistributedGptOssModel._keys_to_ignore_on_load_unexpected
 
     config_class = DistributedGptOssConfig
 
     def __init__(self, config: DistributedGptOssConfig):
+        # Set fp32 lists to None before creating DistributedGptOssModel
+        # None bypasses the validation check in transformers
+        config._keep_in_fp32_modules = None
+        config._keep_in_fp32_modules_strict = None
         GptOssPreTrainedModel.__init__(self, config)
         self.num_labels = config.num_labels
 
