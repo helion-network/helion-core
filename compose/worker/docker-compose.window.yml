@@ -10,7 +10,7 @@ networks:
 services:
   # -------------------- GPU WORKER --------------------
   worker:
-    image: phongnhat19/helion:v0.0.1
+    image: phongnhat19/helion:latest
     # build:
       # context: ../..
       # dockerfile: Dockerfile

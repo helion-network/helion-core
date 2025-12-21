@@ -4,21 +4,22 @@ volumes:
   helion-cache:
 
 networks:
-  petals-net:
-    name: petals-net
+  helion-net:
+    name: helion-net
 
 services:
   # -------------------- GPU WORKER --------------------
   worker:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    container_name: petals-worker
+    image: phongnhat19/helion:latest
+    # build:
+    #   context: ../..
+    #   dockerfile: Dockerfile
+    container_name: helion-worker
     # Windows Compose requires a LIST for GPUs; 'ipc: host' is not supported on Windows
     gpus:
       - count: all
-    env_file:
-      - ./.env
+    # env_file:
+    #   - ./.env
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -32,4 +33,4 @@ services:
       - ./config.yml:/home/helion/config.yml:ro
       - ./identity:/home/user/.config/helion
     # networks: [petals-net]
-    restart: unless-stopped
+    # restart: unless-stopped
