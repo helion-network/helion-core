@@ -2,6 +2,7 @@ from helion.utils.auto_config import (
     AutoDistributedConfig,
     AutoDistributedModel,
     AutoDistributedModelForCausalLM,
+    AutoDistributedModelForConditionalGeneration,
     AutoDistributedModelForSequenceClassification,
     AutoDistributedSpeculativeModel,
 )

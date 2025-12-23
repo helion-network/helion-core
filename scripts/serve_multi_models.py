@@ -11,6 +11,13 @@ Example:
         --initial-peers "/ip4/203.0.113.10/tcp/31337/p2p/PeerIdHere" \
         --hf-token hf_xxx \
         --port 8080
+
+MedGemma (multimodal) example:
+    python scripts/serve_multi_models.py --models google/medgemma-4b-it --hf-token hf_xxx --port 8080
+
+    curl -X POST http://localhost:8080/chat ^
+      -H "Content-Type: application/json" ^
+      -d "{\"model\":\"google/medgemma-4b-it\",\"messages\":[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"You are an expert radiologist.\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Describe this X-ray\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://upload.wikimedia.org/wikipedia/commons/c/c8/Chest_Xray_PA_3-8-2010.png\"}}]}],\"max_tokens\":200,\"temperature\":0}"
 """
 
 from __future__ import annotations
@@ -27,14 +34,20 @@ from typing import Any, Dict, List, Optional, Tuple
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
-from helion.utils.auto_config import AutoDistributedConfig, AutoDistributedModelForCausalLM
+from helion.utils.auto_config import (
+    AutoDistributedConfig,
+    AutoDistributedModelForCausalLM,
+    AutoDistributedModelForConditionalGeneration,
+)
 
 
 class ChatRequest(BaseModel):
     model: Optional[str] = None
-    messages: List[Dict[str, str]]
+    # For text-only models: {"role": "...", "content": "..."}
+    # For multimodal (Gemma3/MedGemma): {"role": "...", "content": [{"type":"text","text":"..."}, {"type":"image","url":"..."}]}
+    messages: List[Dict[str, Any]]
     max_tokens: int = 256
     temperature: float = 0.2
     top_p: float = 0.95
@@ -47,8 +60,8 @@ def load_models(
     dht_prefix: Optional[str],
 ):
     import sys
-    tokenizers: Dict[str, AutoTokenizer] = {}
-    models: Dict[str, AutoDistributedModelForCausalLM] = {}
+    preprocessors: Dict[str, Any] = {}
+    models: Dict[str, Any] = {}
 
     def _normalize_dht_prefix(prefix: Optional[str]) -> Optional[str]:
         """
@@ -85,28 +98,42 @@ def load_models(
             cfg._keep_in_fp32_modules = None
             cfg._keep_in_fp32_modules_strict = None
 
-        print(f"  Loading tokenizer...", file=sys.stderr, flush=True)
-        tok = AutoTokenizer.from_pretrained(mid, token=hf_token)
-        tok.padding_side = "left"
-        if tok.pad_token is None:
-            tok.pad_token = tok.eos_token
+        print(f"  Loading tokenizer/processor...", file=sys.stderr, flush=True)
+        if getattr(cfg, "model_type", "") == "gemma3":
+            try:
+                pre = AutoProcessor.from_pretrained(mid, token=hf_token)
+            except ImportError as e:
+                raise SystemExit(
+                    "Missing dependency for Gemma3/MedGemma processor. Install Pillow:\n"
+                    "  pip install pillow\n"
+                    "If you're running in Docker, rebuild the image after updating dependencies.\n"
+                    f"Original error: {e}"
+                )
+        else:
+            pre = AutoTokenizer.from_pretrained(mid, token=hf_token)
+            pre.padding_side = "left"
+            if getattr(pre, "pad_token", None) is None:
+                pre.pad_token = pre.eos_token
 
         print(f"  Loading distributed model (connecting to swarm, this may take a moment)...", file=sys.stderr, flush=True)
         # Final safety: set fp32 lists to None right before model creation (defensive)
         if getattr(cfg, "model_type", "") in {"gpt_oss", "gpt-oss"}:
             cfg._keep_in_fp32_modules = None
             cfg._keep_in_fp32_modules_strict = None
-        mdl = AutoDistributedModelForCausalLM.from_pretrained(mid, config=cfg, token=hf_token)
+        if getattr(cfg, "model_type", "") == "gemma3":
+            mdl = AutoDistributedModelForConditionalGeneration.from_pretrained(mid, config=cfg, token=hf_token)
+        else:
+            mdl = AutoDistributedModelForCausalLM.from_pretrained(mid, config=cfg, token=hf_token)
         print(f"  ✓ Model {mid} loaded successfully", file=sys.stderr, flush=True)
 
-        tokenizers[mid] = tok
+        preprocessors[mid] = pre
         models[mid] = mdl
 
     print(f"All {len(model_ids)} models loaded. Starting server...", file=sys.stderr, flush=True)
-    return models, tokenizers
+    return models, preprocessors
 
 
-def create_app(models: Dict[str, AutoDistributedModelForCausalLM], tokenizers: Dict[str, AutoTokenizer], default_model: str):
+def create_app(models: Dict[str, Any], preprocessors: Dict[str, Any], default_model: str):
     app = FastAPI(title="Helion Multi-Model Test Server")
     # Local-only imports: keep server startup lightweight, but allow richer state decoding in health
     from helion.data_structures import ServerState  # type: ignore
@@ -494,27 +521,73 @@ def create_app(models: Dict[str, AutoDistributedModelForCausalLM], tokenizers: D
         if model_id not in models:
             raise HTTPException(status_code=400, detail=f"Model {model_id} not loaded")
 
-        tok = tokenizers[model_id]
         mdl = models[model_id]
+        pre = preprocessors[model_id]
+        model_type = getattr(getattr(mdl, "config", None), "model_type", None)
 
-        if hasattr(tok, "apply_chat_template"):
-            input_ids = tok.apply_chat_template(
-                req.messages,
+        if model_type == "gemma3":
+            def _normalize_gemma3_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                out: List[Dict[str, Any]] = []
+                for m in messages:
+                    role = m.get("role")
+                    content = m.get("content")
+                    if isinstance(content, list):
+                        new_parts = []
+                        for part in content:
+                            if not isinstance(part, dict):
+                                continue
+                            if part.get("type") == "image_url":
+                                url = (part.get("image_url") or {}).get("url")
+                                if url:
+                                    new_parts.append({"type": "image", "url": url})
+                                continue
+                            new_parts.append(part)
+                        out.append({"role": role, "content": new_parts})
+                    else:
+                        out.append({"role": role, "content": content})
+                return out
+
+            # Multimodal: AutoProcessor returns a dict with input_ids/token_type_ids/pixel_values (if any)
+            inputs = pre.apply_chat_template(
+                _normalize_gemma3_messages(req.messages),
                 add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
                 return_tensors="pt",
-            ).to(mdl.device)
+            )
+            # Move tensors to model device
+            for k, v in list(inputs.items()):
+                if hasattr(v, "to"):
+                    inputs[k] = v.to(mdl.device)
+            input_len = int(inputs["input_ids"].shape[-1])
+            outputs = mdl.generate(
+                **inputs,
+                max_new_tokens=req.max_tokens,
+                do_sample=req.temperature > 0.0,
+                temperature=max(0.0, req.temperature),
+                top_p=req.top_p,
+            )
+            gen = outputs[0][input_len:]
+            text = pre.decode(gen, skip_special_tokens=True)
         else:
             prompt = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in req.messages)
-            input_ids = tok(prompt, return_tensors="pt").input_ids.to(mdl.device)
+            if hasattr(pre, "apply_chat_template"):
+                input_ids = pre.apply_chat_template(
+                    req.messages,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                ).to(mdl.device)
+            else:
+                input_ids = pre(prompt, return_tensors="pt").input_ids.to(mdl.device)
 
-        outputs = mdl.generate(
-            input_ids,
-            max_new_tokens=req.max_tokens,
-            do_sample=req.temperature > 0.0,
-            temperature=max(0.0, req.temperature),
-            top_p=req.top_p,
-        )
-        text = tok.decode(outputs[0], skip_special_tokens=True)
+            outputs = mdl.generate(
+                input_ids,
+                max_new_tokens=req.max_tokens,
+                do_sample=req.temperature > 0.0,
+                temperature=max(0.0, req.temperature),
+                top_p=req.top_p,
+            )
+            text = pre.decode(outputs[0], skip_special_tokens=True)
         return {"model": model_id, "output": text}
 
     return app
@@ -544,9 +617,9 @@ def main():
         raise SystemExit("No models provided. Set --models or MODELS env to a comma-separated list.")
     peers = [p.strip() for p in args.initial_peers.split(",") if p.strip()] or None
 
-    models, tokenizers = load_models(model_ids, args.hf_token, peers, args.dht_prefix)
+    models, preprocessors = load_models(model_ids, args.hf_token, peers, args.dht_prefix)
     default_model = model_ids[0]
-    app = create_app(models, tokenizers, default_model)
+    app = create_app(models, preprocessors, default_model)
 
     uvicorn.run(app, host=args.host, port=args.port)
 

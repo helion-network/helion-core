@@ -17,7 +17,7 @@ from helion.server.backend import TransformerBackend
 from helion.server.task_pool import PrioritizedTaskPool
 from helion.server.task_prioritizer import TaskPrioritizerBase
 from helion.utils.convert_block import QuantType
-from helion.utils.misc import DUMMY, is_dummy
+from helion.utils.misc import DUMMY, DUMMY_INT64, is_dummy
 from helion.utils.packaging import unpack_args_kwargs
 
 # We prioritize short inference requests and make them use a *merged* inference pool,
@@ -173,11 +173,18 @@ async def iterate_rpc_inference(
             flat_tensors, kwargs = unpack_args_kwargs(flat_tensors, args_structure)
 
         hidden_states, prompts, hypo_ids, *_ = flat_tensors
+        token_type_ids = None
+        try:
+            token_type_ids = (kwargs or {}).get("token_type_ids")
+        except Exception:
+            token_type_ids = None
         batch_size, length_increment, _ = hidden_states.shape
 
         # Cast inputs to backend dtype
         hidden_states = hidden_states.to(requested_backends[0].dtype)
         assert hypo_ids.dtype == torch.int64, f"hypo ids must be int64, got {hypo_ids.dtype}"
+        if token_type_ids is not None and not is_dummy(token_type_ids):
+            assert token_type_ids.dtype == torch.int64, f"token_type_ids must be int64, got {token_type_ids.dtype}"
 
         # parse deep prompts (optional argument)
         has_prompts = prompts is not None and not is_dummy(prompts)
@@ -216,13 +223,23 @@ async def iterate_rpc_inference(
                     for uid, handles in zip(requested_uids, cache_handles)
                 )
                 (hidden_states,) = await requested_backends[0].inference_pool.submit_task(
-                    hidden_states, hypo_ids, inference_infos, *prompts, priority=priority
+                    hidden_states,
+                    hypo_ids,
+                    token_type_ids if token_type_ids is not None else DUMMY_INT64,
+                    inference_infos,
+                    *prompts,
+                    priority=priority,
                 )
             else:
                 for backend, uid, handles, prompt in zip(requested_backends, requested_uids, cache_handles, prompts):
                     inference_infos = (InferenceMetadata(uid, prefix_length, tuple(handles), active_adapter),)
                     (hidden_states,) = await backend.inference_pool.submit_task(
-                        hidden_states, hypo_ids, inference_infos, prompt, priority=priority
+                        hidden_states,
+                        hypo_ids,
+                        token_type_ids if token_type_ids is not None else DUMMY_INT64,
+                        inference_infos,
+                        prompt,
+                        priority=priority,
                     )
 
         # serialize and send last layer outputs

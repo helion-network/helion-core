@@ -101,6 +101,7 @@ class _ServerInferenceSession:
         hypo_ids: torch.LongTensor,
         *,
         step_id: str,
+        **extra_kwargs,
     ) -> torch.Tensor:
         """
         Inference step: send a chunk of input tensors and receive a chunk of outputs
@@ -126,7 +127,8 @@ class _ServerInferenceSession:
             inputs = inputs[:, -n_input_tokens:]  # No need to pass prefix further
 
         # serialize inputs and put them into the queue
-        input_tensors, args_structure = pack_args_kwargs(inputs, prompts, hypo_ids)
+        # NOTE: extra kwargs are best-effort; server may ignore unknown kwargs.
+        input_tensors, args_structure = pack_args_kwargs(inputs, prompts, hypo_ids, **extra_kwargs)
 
         request_metadata = dict(session_id=self.session_id, step_id=step_id)
         if not self.stepped:
@@ -286,6 +288,7 @@ class InferenceSession:
         inputs: torch.Tensor,
         prompts: Optional[torch.Tensor] = None,
         hypo_ids: Optional[torch.Tensor] = None,
+        **extra_kwargs,
     ) -> torch.Tensor:
         assert not self._closed
         if torch.is_grad_enabled():
@@ -311,6 +314,13 @@ class InferenceSession:
         inputs = inputs.cpu()
         prompts = prompts.cpu()
         hypo_ids = hypo_ids.cpu()
+        extra_kwargs_cpu = {}
+        for k, v in extra_kwargs.items():
+            if v is None:
+                continue
+            if not isinstance(v, torch.Tensor):
+                raise TypeError(f"InferenceSession.step extra kwarg {k} must be a torch.Tensor or None, got {type(v)}")
+            extra_kwargs_cpu[k] = v.cpu()
         step_id = str(uuid.uuid4())
 
         n_input_tokens = inputs.shape[1]
@@ -336,6 +346,7 @@ class InferenceSession:
                         prompts[server_session.span.start : server_session.span.end],
                         hypo_ids,
                         step_id=step_id,
+                        **extra_kwargs_cpu,
                     )
 
                     server_idx += 1

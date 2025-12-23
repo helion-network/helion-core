@@ -123,6 +123,7 @@ class TransformerBackend(ModuleBackend):
         hidden_states: torch.Tensor,
         hypo_ids: torch.LongTensor,
         inference_info: InferenceMetadata,
+        token_type_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, ...]:
         assert hidden_states.ndim == 3, "expected hidden states to be 3-dimensional: [batch_size, seq_len, hid_size]"
         seq_len = hidden_states.shape[1]
@@ -136,13 +137,21 @@ class TransformerBackend(ModuleBackend):
             # reserved in `Server._choose_num_blocks()`. This saves us from OOMs if `max_chunk_size_bytes`
             # is at least 4-6x less than `autograd_memory`.
             max_chunk_length = self._estimate_max_chunk_length(hidden_states, inference_info)
+            # Gemma3 multimodal masking needs consistent q/kv indices; chunking would break it.
+            if token_type_ids is not None and not is_dummy(token_type_ids) and hidden_states.shape[1] > 1:
+                max_chunk_length = hidden_states.shape[1]
             output_hidden_states = torch.empty_like(hidden_states) if seq_len > max_chunk_length else None
             layer_past = self._select_layer_past(cache_tensors, inference_info.prefix_length)
             for offset in range(0, seq_len, max_chunk_length):
                 hidden_states_chunk = hidden_states[:, offset : offset + max_chunk_length, :]
-                output_hidden_states_chunk, new_kvs = self.module.forward(
-                    hidden_states_chunk, layer_past=layer_past, use_cache=True
-                )
+                if token_type_ids is not None and not is_dummy(token_type_ids):
+                    output_hidden_states_chunk, new_kvs = self.module.forward(
+                        hidden_states_chunk, layer_past=layer_past, use_cache=True, token_type_ids=token_type_ids
+                    )
+                else:
+                    output_hidden_states_chunk, new_kvs = self.module.forward(
+                        hidden_states_chunk, layer_past=layer_past, use_cache=True
+                    )
                 if seq_len > max_chunk_length:
                     output_hidden_states[:, offset : offset + max_chunk_length] = output_hidden_states_chunk
                 else:
@@ -231,6 +240,7 @@ class _MergedInferenceStep:
         self,
         hidden_states: torch.Tensor,
         hypo_ids: torch.LongTensor,
+        token_type_ids: torch.Tensor,
         inference_infos: Sequence[InferenceMetadata],
         *optional_prompts: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, ...]:
@@ -240,5 +250,7 @@ class _MergedInferenceStep:
         for inference_info, optional_prompt in zip(inference_infos, optional_prompts):
             if optional_prompt is not None:
                 hidden_states[:, : optional_prompt.shape[1]] += optional_prompt
-            (hidden_states,) = self.backends[inference_info.uid].inference_step(hidden_states, hypo_ids, inference_info)
+            (hidden_states,) = self.backends[inference_info.uid].inference_step(
+                hidden_states, hypo_ids, inference_info, token_type_ids=token_type_ids
+            )
         return (hidden_states,)
