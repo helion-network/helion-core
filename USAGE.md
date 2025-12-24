@@ -8,6 +8,19 @@ This guide shows how to run Helion in decentralized inference mode, both as a cl
 - Hugging Face auth if the model is gated/private (`huggingface-cli login` or set `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN`).
 - Open ports (default worker `31337`, gateway `8000`) reachable from your clients or swarm peers.
 
+## Models (what you can load)
+Helion supports a fixed set of Hugging Face *model types* (architectures). You can use **any checkpoint** of these types, as long as you pass the correct HF repo id (or a local path):
+
+- **Llama** (`model_type="llama"`): e.g. `meta-llama/Llama-3.2-1B-Instruct`, `meta-llama/Meta-Llama-3.1-8B-Instruct`
+- **Mixtral** (`model_type="mixtral"`): e.g. `mistralai/Mixtral-8x7B-Instruct-v0.1`
+- **Falcon** (`model_type="falcon"`): e.g. `tiiuae/falcon-40b-instruct`
+- **BLOOM** (`model_type="bloom"`): e.g. `bigscience/bloom`, `bigscience/bloomz`
+- **Gemma 3 family** (`model_type="gemma3"`): e.g. `google/medgemma-4b-it`, `google/medgemma-27b-it`
+- **GPT‑OSS** (`model_type="gpt_oss"`): e.g. `openai/gpt-oss-20b`
+- **Qwen3 family** (`model_type="qwen3"`): e.g. `Qwen/Qwen3-0.6B` (and other Qwen3 sizes like 4B/30B — use the exact repo id you want)
+
+If you pass a model id whose `model_type` is not in the supported list, Helion will fail with an error like “Petals does not support model type …”.
+
 ## Quickstart: Python client
 ```python
 from helion.utils.auto_config import AutoDistributedConfig
@@ -218,6 +231,12 @@ if __name__ == "__main__":
 ```bash
 docker compose -f compose/worker/docker-compose.yml up -d
 ```
+
+Model examples for `compose/worker/config.yml`:
+- `converted_model_name_or_path: "Qwen/Qwen3-0.6B"`
+- `converted_model_name_or_path: "meta-llama/Llama-3.2-1B-Instruct"`
+- `converted_model_name_or_path: "openai/gpt-oss-20b"`
+- `converted_model_name_or_path: "google/medgemma-4b-it"`
 
 ### Gateway
 `compose/gateway/app.py` loads allowed models and exposes an OpenAI-compatible API (default port 8000).
