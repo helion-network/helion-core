@@ -7,7 +7,7 @@ models, then you can hit it with clients or curl.
 
 Example:
     python scripts/serve_multi_models.py \
-        --models meta-llama/Llama-3.2-1B-Instruct,openai/gpt-oss-model \
+        --models meta-llama/Llama-3.2-1B-Instruct,openai/gpt-oss-model,Qwen/Qwen3-0.6B \
         --initial-peers "/ip4/203.0.113.10/tcp/31337/p2p/PeerIdHere" \
         --hf-token hf_xxx \
         --port 8080
