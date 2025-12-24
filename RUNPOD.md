@@ -162,7 +162,7 @@ identity_path: "/workspace/helion-identity/.config/helion/identity.bin"
 
 ```bash
 # Set cache directory environment variable
-export PETALS_CACHE=/cache
+export HELION_CACHE=/cache
 
 # Set Hugging Face token (if using gated models)
 export HF_TOKEN="your_huggingface_token_here"
@@ -245,7 +245,7 @@ Add:
 
 ```bash
 #!/bin/bash
-export PETALS_CACHE=/cache
+export HELION_CACHE=/cache
 export PATH="/opt/conda/bin:${PATH}"
 cd /workspace/helion-core
 python -m helion.cli.run_server --config config.yml
@@ -375,7 +375,7 @@ mkdir -p /workspace/helion-identity/.config/helion
 mkdir -p /cache
 
 # Set environment
-export PETALS_CACHE=/cache
+export HELION_CACHE=/cache
 export PATH="/opt/conda/bin:${PATH}"
 
 echo "Setup complete! Configure your config.yml and run the server."
