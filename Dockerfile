@@ -29,7 +29,7 @@ RUN conda install -y python~=3.10.12 pip && \
     conda clean --all && rm -rf ~/.cache/pip
 
 VOLUME /cache
-ENV PETALS_CACHE=/cache
+ENV HELION_CACHE=/cache
 
 COPY . helion/
 RUN pip install --no-cache-dir -e helion

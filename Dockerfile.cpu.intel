@@ -44,7 +44,7 @@ RUN pip install --no-cache-dir torch==2.1.2 && \
     pip install --no-cache-dir "transformers>=4.55.0,<4.56.0"
 
 VOLUME /cache
-ENV PETALS_CACHE=/cache
+ENV HELION_CACHE=/cache
 
 COPY . helion/
 

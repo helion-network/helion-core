@@ -22,7 +22,7 @@ services:
     env_file:
       - ./.env
     environment:
-      - PETALS_CACHE=/cache
+      - HELION_CACHE=/cache
       - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
       - HF_TOKEN=${HF_TOKEN:-}
     command: >

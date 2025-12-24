@@ -32,5 +32,5 @@ services:
       - ./helion-cache:/cache
       - ./config.yml:/home/helion/config.yml:ro
       - ./identity:/home/user/.config/helion
-    # networks: [petals-net]
+    # networks: [helion-net]
     # restart: unless-stopped

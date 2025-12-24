@@ -10,7 +10,9 @@ from hivemind.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_CACHE_DIR = os.getenv("PETALS_CACHE", Path(Path.home(), ".cache", "petals"))
+_ENV_CACHE_DIR = os.getenv("HELION_CACHE") or os.getenv("PETALS_CACHE")
+# Prefer HELION_CACHE, keep PETALS_CACHE as a backwards-compatible fallback.
+DEFAULT_CACHE_DIR = Path(_ENV_CACHE_DIR) if _ENV_CACHE_DIR else Path(Path.home(), ".cache", "helion")
 
 BLOCKS_LOCK_FILE = "blocks.lock"
 

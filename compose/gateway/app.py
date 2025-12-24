@@ -400,7 +400,7 @@ def list_models():
     return {
         "object": "list",
         "data": [
-            {"id": mid, "object": "model", "created": 0, "owned_by": "petals"}
+            {"id": mid, "object": "model", "created": 0, "owned_by": "helion"}
             for mid in ALLOWED_MODELS
         ],
     }
