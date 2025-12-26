@@ -496,7 +496,9 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
         # Infer actual sequence length from tensor shape to avoid shape mismatches
         # key_states and value_states are [B, Hkv, T, D], so shape[2] is the sequence length
         actual_seq_length = key_states.shape[2]
-        value_states = value_states.view(batch_size * num_kv_heads, actual_seq_length, self.self_attn.head_dim)
+        # Infer head_dim from the actual tensor (robust under TP / cache head_dim overrides)
+        head_dim = int(value_states.shape[-1])
+        value_states = value_states.view(batch_size * num_kv_heads, actual_seq_length, head_dim)
         key_states = key_states.view(*value_states.shape)
         key_states = key_states.permute(0, 2, 1)
         return (key_states, value_states)
