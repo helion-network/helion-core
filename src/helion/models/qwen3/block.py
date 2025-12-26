@@ -196,14 +196,34 @@ class OptimizedQwen3Attention(Qwen3Attention):
 
         if past_key_value is not None:
             # reuse k, v, self_attention
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+            past_k, past_v = past_key_value
+            # past/new are expected to be [B, Hkv, T, D]. In some tensor-parallel/distributed scenarios,
+            # (Hkv, D) can differ between cache and current projections while keeping the total per-token
+            # width (Hkv * D) constant (e.g. 8*128 vs 16*64). If so, reinterpret the cache to match current.
+            if past_k.shape[1] != key_states.shape[1] or past_k.shape[3] != key_states.shape[3]:
+                past_width = int(past_k.shape[1]) * int(past_k.shape[3])
+                curr_width = int(key_states.shape[1]) * int(key_states.shape[3])
+                if past_width != curr_width:
+                    raise RuntimeError(
+                        "Incompatible KV cache layout: "
+                        f"past(H={past_k.shape[1]},D={past_k.shape[3]}) vs "
+                        f"curr(H={key_states.shape[1]},D={key_states.shape[3]}), "
+                        f"widths {past_width} != {curr_width}"
+                    )
+                # Ensure contiguous before view/reshape
+                past_k = past_k.contiguous().reshape(bsz, key_states.shape[1], past_k.shape[2], key_states.shape[3])
+                past_v = past_v.contiguous().reshape(bsz, value_states.shape[1], past_v.shape[2], value_states.shape[3])
+
+            key_states = torch.cat([past_k, key_states], dim=2)
+            value_states = torch.cat([past_v, value_states], dim=2)
 
         past_key_value = (key_states, value_states) if use_cache else None
 
         # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        # Compute replication factor from actual head counts (more robust under tensor-parallel reshapes)
+        n_rep = query_states.shape[1] // key_states.shape[1]
+        key_states = repeat_kv(key_states, n_rep)
+        value_states = repeat_kv(value_states, n_rep)
 
         # Use head_dim_to_use for scaling to match the actual head_dim being used
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim_to_use)
