@@ -349,8 +349,12 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
         key_states, value_states = key_value
         key_states = key_states.permute(0, 2, 1)
         num_kv_heads = self._get_num_kv_heads()
-        key_states = key_states.view(batch_size, num_kv_heads, seq_length, self.self_attn.head_dim)
-        value_states = value_states.view(*key_states.shape)
+        # Infer actual sequence length from tensor shape after permuting
+        # After permute: key_states is [B*Hkv, T, D], so shape[1] is the actual sequence length
+        # This fixes shape mismatches when the passed seq_length doesn't match the actual cache size
+        actual_seq_length = key_states.shape[1]
+        key_states = key_states.view(batch_size, num_kv_heads, actual_seq_length, self.self_attn.head_dim)
+        value_states = value_states.view(batch_size, num_kv_heads, actual_seq_length, self.self_attn.head_dim)
         return (key_states, value_states)
 
     def _reorder_cache_from_qwen3_to_bloom(
