@@ -288,7 +288,9 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
 
         past_key_value = layer_past
         if past_key_value is not None:
-            past_key_values_length = past_key_value[0].shape[2]
+            # Infer sequence length from value tensor which is [B*Hkv, T, D] in Bloom format
+            # This is more reliable than using key tensor shape[2]
+            past_key_values_length = past_key_value[1].shape[1]
             seq_length_with_past = seq_length_with_past + past_key_values_length
             past_key_value = self._reorder_cache_from_bloom_to_qwen3(past_key_value, batch_size, past_key_values_length)
 
@@ -362,7 +364,10 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
     ) -> Tuple[torch.Tensor]:
         key_states, value_states = key_value
         num_kv_heads = self._get_num_kv_heads()
-        value_states = value_states.view(batch_size * num_kv_heads, seq_length, self.self_attn.head_dim)
+        # Infer actual sequence length from tensor shape to avoid shape mismatches
+        # key_states and value_states are [B, Hkv, T, D], so shape[2] is the sequence length
+        actual_seq_length = key_states.shape[2]
+        value_states = value_states.view(batch_size * num_kv_heads, actual_seq_length, self.self_attn.head_dim)
         key_states = key_states.view(*value_states.shape)
         key_states = key_states.permute(0, 2, 1)
         return (key_states, value_states)
