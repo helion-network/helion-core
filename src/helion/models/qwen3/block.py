@@ -134,8 +134,16 @@ class OptimizedQwen3Attention(Qwen3Attention):
         if past_key_value is not None:
             cache_kv_heads = int(past_key_value[0].shape[1])
             cache_head_dim = int(past_key_value[0].shape[-1])
-            expected_q_heads = cache_kv_heads * int(getattr(self, "num_key_value_groups", 1))
-            q_needed = expected_q_heads * cache_head_dim
+            # Derive the number of query heads from the actual projection/output width expected by o_proj.
+            # Under tensor-parallel sharding, this is the per-shard hidden size.
+            proj_hidden = int(getattr(self.o_proj, "in_features", self.hidden_size))
+            if proj_hidden % cache_head_dim != 0:
+                raise RuntimeError(
+                    "Cannot infer query heads from o_proj.in_features and cache_head_dim: "
+                    f"o_proj.in_features={proj_hidden}, cache_head_dim={cache_head_dim}"
+                )
+            q_heads = proj_hidden // cache_head_dim
+            q_needed = q_heads * cache_head_dim
             kv_needed = cache_kv_heads * cache_head_dim
 
             if q_out < q_needed or kv_out < kv_needed:
@@ -148,7 +156,7 @@ class OptimizedQwen3Attention(Qwen3Attention):
             if q_out != q_needed:
                 warnings.warn(
                     f"Slicing q_proj output from {q_out} -> {q_needed} to match cache layout "
-                    f"(q_heads={expected_q_heads}, head_dim={cache_head_dim})"
+                    f"(q_heads={q_heads}, head_dim={cache_head_dim})"
                 )
                 query_states = query_states[..., :q_needed]
 
@@ -161,7 +169,6 @@ class OptimizedQwen3Attention(Qwen3Attention):
                 value_states = value_states[..., :kv_needed]
 
             head_dim_to_use = cache_head_dim
-            q_heads = expected_q_heads
             kv_heads = cache_kv_heads
         else:
             # No cache: infer from module/config attributes.
