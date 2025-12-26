@@ -341,18 +341,13 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
         position_ids = torch.arange(
             past_key_values_length, past_key_values_length + seq_length, device=hidden_states.device
         ).unsqueeze(0)
-
-        # HF>=4.45: Compute position embeddings externally
-        # Create a dummy tensor with the shape that rotary_emb expects (batch_size, num_key_value_heads, seq_length, head_dim)
-        # The rotary_emb only uses the shape, not the actual values
-        num_kv_heads = self._get_num_kv_heads()
-        head_dim = getattr(self.self_attn, "head_dim", self.config.hidden_size // self.config.num_attention_heads)
-        dummy_value_states = torch.zeros(
-            (batch_size, num_kv_heads, seq_length, head_dim),
-            device=hidden_states.device,
-            dtype=hidden_states.dtype,
-        )
-        position_embeddings = self.self_attn.rotary_emb(dummy_value_states, position_ids)
+        # IMPORTANT:
+        # Don't compute RoPE position embeddings externally here.
+        # In distributed / tensor-parallel setups, the KV cache head_dim can differ from config.head_dim.
+        # If we build (cos,sin) using a config-derived head_dim, it can mismatch q/k head_dim at runtime
+        # (e.g. 64 vs 128) and crash in apply_rotary_pos_emb.
+        # OptimizedQwen3Attention.forward() will compute RoPE internally from the actual value_states shape.
+        position_embeddings = None
 
         # embed positions
         if attention_mask is None:
