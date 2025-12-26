@@ -118,48 +118,61 @@ class OptimizedQwen3Attention(Qwen3Attention):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
 
-        # Determine head_dim to use - check cache if available
-        head_dim_to_use = self.head_dim
+        # Reshape q/k/v in a way that's consistent with the *actual cache layout* when cache is present.
+        #
+        # In Helion's tensor-parallel runtime, the backend allocates KV cache per-shard using:
+        #  - kv_heads_per_shard = shard_num_heads // num_key_value_groups
+        #  - head_dim = config.hidden_size // config.num_attention_heads
+        #
+        # However, transformers modules may still carry global head counts. To avoid mismatches like
+        # cache(Hkv=8,D=64) vs projection(Hkv=16,D=64), we:
+        #  - when cache exists: force kv_heads/head_dim to match cache, and slice projection outputs if needed
+        #  - otherwise: fall back to config/module attributes
+        q_out = int(query_states.shape[-1])
+        kv_out = int(key_states.shape[-1])
+
         if past_key_value is not None:
-            past_key_head_dim = past_key_value[0].shape[-1]
-            if past_key_head_dim != self.head_dim:
-                # Cache has different head_dim (e.g., from tensor parallelism)
-                # Use the cache's head_dim to ensure compatibility
-                head_dim_to_use = past_key_head_dim
+            cache_kv_heads = int(past_key_value[0].shape[1])
+            cache_head_dim = int(past_key_value[0].shape[-1])
+            expected_q_heads = cache_kv_heads * int(getattr(self, "num_key_value_groups", 1))
+            q_needed = expected_q_heads * cache_head_dim
+            kv_needed = cache_kv_heads * cache_head_dim
+
+            if q_out < q_needed or kv_out < kv_needed:
+                raise RuntimeError(
+                    "Projection output is smaller than required by cache layout: "
+                    f"q_out={q_out}, need={q_needed}; kv_out={kv_out}, need={kv_needed}; "
+                    f"cache_kv_heads={cache_kv_heads}, cache_head_dim={cache_head_dim}"
+                )
+
+            if q_out != q_needed:
                 warnings.warn(
-                    f"Using cache's head_dim={past_key_head_dim} instead of model's head_dim={self.head_dim} "
-                    f"to ensure compatibility. This may be due to tensor parallelism."
+                    f"Slicing q_proj output from {q_out} -> {q_needed} to match cache layout "
+                    f"(q_heads={expected_q_heads}, head_dim={cache_head_dim})"
                 )
-        
-        # Use head_dim_to_use for all states to ensure consistency
-        # If cache has different head_dim, we need to use it for query, key, and value
-        q_output_size = query_states.shape[-1]
-        kv_output_size = key_states.shape[-1]
-        
-        if head_dim_to_use != self.head_dim:
-            # Recalculate num_heads and num_key_value_heads based on actual output and target head_dim
-            # This handles tensor parallelism where head_dim is split
-            actual_num_heads = q_output_size // head_dim_to_use
-            actual_num_kv_heads = kv_output_size // head_dim_to_use
-            if actual_num_heads * head_dim_to_use != q_output_size:
-                raise ValueError(
-                    f"Cannot reshape query states: output_size={q_output_size} is not divisible by "
-                    f"head_dim_to_use={head_dim_to_use}. Cache head_dim={past_key_head_dim}, "
-                    f"model head_dim={self.head_dim}"
+                query_states = query_states[..., :q_needed]
+
+            if kv_out != kv_needed:
+                warnings.warn(
+                    f"Slicing k/v_proj output from {kv_out} -> {kv_needed} to match cache layout "
+                    f"(kv_heads={cache_kv_heads}, head_dim={cache_head_dim})"
                 )
-            if actual_num_kv_heads * head_dim_to_use != kv_output_size:
-                raise ValueError(
-                    f"Cannot reshape key/value states: output_size={kv_output_size} is not divisible by "
-                    f"head_dim_to_use={head_dim_to_use}. Cache head_dim={past_key_head_dim}, "
-                    f"model head_dim={self.head_dim}"
-                )
-            query_states = query_states.view(bsz, q_len, actual_num_heads, head_dim_to_use).transpose(1, 2)
-            key_states = key_states.view(bsz, q_len, actual_num_kv_heads, head_dim_to_use).transpose(1, 2)
-            value_states = value_states.view(bsz, q_len, actual_num_kv_heads, head_dim_to_use).transpose(1, 2)
+                key_states = key_states[..., :kv_needed]
+                value_states = value_states[..., :kv_needed]
+
+            head_dim_to_use = cache_head_dim
+            q_heads = expected_q_heads
+            kv_heads = cache_kv_heads
         else:
-            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-            key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-            value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            # No cache: infer from module/config attributes.
+            head_dim_to_use = int(getattr(self, "head_dim", self.config.hidden_size // self.config.num_attention_heads))
+            q_heads = int(getattr(self, "num_heads", self.config.num_attention_heads))
+            kv_heads = int(getattr(self, "num_key_value_heads", max(1, q_heads // int(getattr(self, "num_key_value_groups", 1)))))
+
+        # Final reshape to [B, H, T, D]
+        query_states = query_states.view(bsz, q_len, q_heads, head_dim_to_use).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, kv_heads, head_dim_to_use).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, kv_heads, head_dim_to_use).transpose(1, 2)
 
         # HF>=4.45: Use externally provided position embeddings if available, otherwise compute internally
         if position_embeddings is not None:
