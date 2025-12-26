@@ -170,6 +170,25 @@ class OptimizedQwen3Attention(Qwen3Attention):
             cos, sin = self.rotary_emb(value_states, position_ids)
             cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
 
+        # In some distributed / tensor-parallel setups, the KV cache (and thus q/k/v) can end up with a different
+        # per-head dimension than config-derived rotary embeddings. Align RoPE tensors to the actual q/k head_dim.
+        q_head_dim = query_states.shape[-1]
+        rope_head_dim = cos.shape[-1]
+        if rope_head_dim != q_head_dim:
+            # Slice to the common head dim to avoid runtime shape errors in apply_rotary_pos_emb.
+            common = min(rope_head_dim, q_head_dim)
+            if common <= 0:
+                raise ValueError(
+                    f"Invalid RoPE head_dim alignment: q_head_dim={q_head_dim}, rope_head_dim={rope_head_dim}, "
+                    f"query_states.shape={query_states.shape}, cos.shape={cos.shape}"
+                )
+            if rope_head_dim != common:
+                cos = cos[..., :common]
+                sin = sin[..., :common]
+            if q_head_dim != common:
+                query_states = query_states[..., :common]
+                key_states = key_states[..., :common]
+
         if q_len == 1 and torch.is_inference_mode_enabled() and hidden_states.device.type == "cuda":
             query_states, key_states = self._optimized_apply_rotary(query_states, key_states, cos, sin)
         else:
