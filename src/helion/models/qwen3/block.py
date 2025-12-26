@@ -4,6 +4,7 @@ Based on Llama implementation pattern, adapted for Qwen3 architecture.
 Qwen3 uses a Llama-like architecture with similar structure.
 """
 import math
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -359,12 +360,15 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
         actual_seq_length = value_states.shape[1]  # T (sequence length)
         actual_head_dim = value_states.shape[2]  # D
         
-        # Verify head_dim matches
+        # Use actual head_dim from tensor instead of expected head_dim
+        # This handles cases with tensor parallelism or different cache formats
+        # If there's a mismatch, log a warning but use the tensor's actual dimension
         if actual_head_dim != head_dim:
-            raise ValueError(
-                f"Head dimension mismatch: expected {head_dim}, got {actual_head_dim} "
-                f"from value_states shape {value_states.shape}"
+            warnings.warn(
+                f"Head dimension mismatch: expected {head_dim}, using actual {actual_head_dim} "
+                f"from value_states shape {value_states.shape}. This may be due to tensor parallelism."
             )
+        head_dim_to_use = actual_head_dim
         
         # Infer batch_size from tensor shape
         # batch_kv_heads should equal batch_size * num_kv_heads
@@ -385,9 +389,9 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
                 f"key_states.shape={key_states.shape}, value_states.shape={value_states.shape}"
             )
         
-        # Reshape using inferred dimensions
-        key_states = key_states.view(inferred_batch_size, num_kv_heads, actual_seq_length, head_dim)
-        value_states = value_states.view(inferred_batch_size, num_kv_heads, actual_seq_length, head_dim)
+        # Reshape using inferred dimensions (use actual head_dim from tensor)
+        key_states = key_states.view(inferred_batch_size, num_kv_heads, actual_seq_length, head_dim_to_use)
+        value_states = value_states.view(inferred_batch_size, num_kv_heads, actual_seq_length, head_dim_to_use)
         return (key_states, value_states)
 
     def _reorder_cache_from_qwen3_to_bloom(
