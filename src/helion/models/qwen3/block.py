@@ -118,9 +118,40 @@ class OptimizedQwen3Attention(Qwen3Attention):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
 
+        # Determine head_dim to use - check cache if available
+        head_dim_to_use = self.head_dim
+        if past_key_value is not None:
+            past_key_head_dim = past_key_value[0].shape[-1]
+            if past_key_head_dim != self.head_dim:
+                # Cache has different head_dim (e.g., from tensor parallelism)
+                # Use the cache's head_dim to ensure compatibility
+                head_dim_to_use = past_key_head_dim
+                warnings.warn(
+                    f"Using cache's head_dim={past_key_head_dim} instead of model's head_dim={self.head_dim} "
+                    f"to ensure compatibility. This may be due to tensor parallelism."
+                )
+        
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        
+        # For key/value, use head_dim_to_use to match the cache if there's a mismatch
+        # The projection outputs num_key_value_heads * self.head_dim total dimensions
+        # If head_dim_to_use differs, we need to recalculate how many heads we have
+        kv_output_size = key_states.shape[-1]
+        if head_dim_to_use != self.head_dim:
+            # Recalculate num_key_value_heads based on actual output and target head_dim
+            # This handles tensor parallelism where head_dim is split
+            actual_num_kv_heads = kv_output_size // head_dim_to_use
+            if actual_num_kv_heads * head_dim_to_use != kv_output_size:
+                raise ValueError(
+                    f"Cannot reshape key/value states: output_size={kv_output_size} is not divisible by "
+                    f"head_dim_to_use={head_dim_to_use}. Cache head_dim={past_key_head_dim}, "
+                    f"model head_dim={self.head_dim}"
+                )
+            key_states = key_states.view(bsz, q_len, actual_num_kv_heads, head_dim_to_use).transpose(1, 2)
+            value_states = value_states.view(bsz, q_len, actual_num_kv_heads, head_dim_to_use).transpose(1, 2)
+        else:
+            key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         # HF>=4.45: Use externally provided position embeddings if available, otherwise compute internally
         if position_embeddings is not None:
