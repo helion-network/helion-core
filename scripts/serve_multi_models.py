@@ -15,6 +15,9 @@ Example:
 MedGemma (multimodal) example:
     python scripts/serve_multi_models.py --models google/medgemma-4b-it --hf-token hf_xxx --port 8080
 
+MedGemma smoke-test (text-only) example:
+    python scripts/serve_multi_models.py --models google/medgemma-4b-it --hf-token hf_xxx --port 8080 --smoke-test
+
     curl -X POST http://localhost:8080/chat ^
       -H "Content-Type: application/json" ^
       -d "{\"model\":\"google/medgemma-4b-it\",\"messages\":[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"You are an expert radiologist.\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Describe this X-ray\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://upload.wikimedia.org/wikipedia/commons/c/c8/Chest_Xray_PA_3-8-2010.png\"}}]}],\"max_tokens\":200,\"temperature\":0}"
@@ -23,12 +26,15 @@ MedGemma (multimodal) example:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import asyncio
 import threading
 import time
 import numbers
+import urllib.error
+import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
@@ -593,6 +599,33 @@ def create_app(models: Dict[str, Any], preprocessors: Dict[str, Any], default_mo
     return app
 
 
+def _http_post_json(url: str, payload: Dict[str, Any], timeout_s: float = 30.0) -> Dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        body = resp.read().decode("utf-8")
+        return json.loads(body) if body else {}
+
+
+def _wait_http_ok(url: str, timeout_s: float = 60.0, poll_s: float = 0.25) -> None:
+    deadline = time.time() + timeout_s
+    last_err: Optional[Exception] = None
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5.0) as resp:
+                if 200 <= int(resp.status) < 300:
+                    return
+        except Exception as e:
+            last_err = e
+        time.sleep(poll_s)
+    raise TimeoutError(f"Timed out waiting for {url}. Last error: {repr(last_err)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Serve multiple Helion models locally for testing")
     parser.add_argument(
@@ -610,6 +643,26 @@ def main():
     parser.add_argument("--dht-prefix", default=None, help="Optional shared DHT prefix")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Start the server, then run a quick /chat request (useful for MedGemma testing).",
+    )
+    parser.add_argument(
+        "--smoke-test-model",
+        default="google/medgemma-4b-it",
+        help="Model id to use for the smoke test (must be included in --models).",
+    )
+    parser.add_argument(
+        "--smoke-test-message",
+        default="What is Aspirin",
+        help="User message to send to /chat during smoke test.",
+    )
+    parser.add_argument(
+        "--smoke-test-exit",
+        action="store_true",
+        help="If set, stop the server after the smoke test completes.",
+    )
     args = parser.parse_args()
 
     model_ids = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -621,7 +674,44 @@ def main():
     default_model = model_ids[0]
     app = create_app(models, preprocessors, default_model)
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    if not args.smoke_test:
+        uvicorn.run(app, host=args.host, port=args.port)
+        return
+
+    # Smoke-test mode: run uvicorn in a background thread, poll /health, then POST /chat.
+    cfg = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
+    server = uvicorn.Server(cfg)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+
+    client_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+    base_url = f"http://{client_host}:{args.port}"
+
+    try:
+        _wait_http_ok(f"{base_url}/health", timeout_s=60.0)
+        if args.smoke_test_model not in model_ids:
+            raise SystemExit(
+                f"--smoke-test-model {args.smoke_test_model} is not in --models. "
+                f"Provide --models {args.smoke_test_model} (or include it in the list)."
+            )
+
+        payload: Dict[str, Any] = {
+            "model": args.smoke_test_model,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": args.smoke_test_message}]}],
+            "max_tokens": 128,
+            "temperature": 0.0,
+        }
+        print(f"[smoke-test] POST {base_url}/chat", flush=True)
+        resp = _http_post_json(f"{base_url}/chat", payload, timeout_s=180.0)
+        print("[smoke-test] response:", flush=True)
+        print(json.dumps(resp, indent=2, ensure_ascii=False), flush=True)
+    finally:
+        if args.smoke_test_exit:
+            server.should_exit = True
+            t.join(timeout=10.0)
+        else:
+            # Keep the process alive if caller wants to keep serving after smoke test.
+            t.join()
 
 
 if __name__ == "__main__":

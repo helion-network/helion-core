@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+from packaging.version import Version
 from transformers.cache_utils import DynamicCache
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.models.gemma3.modeling_gemma3 import (
@@ -83,12 +84,24 @@ class WrappedGemma3Block(Gemma3DecoderLayer):
         if token_type_ids is not None and seq_length != 1:
             # Same logic as upstream: bidirectional attention within each image token block
             is_image = (token_type_ids == 1).to(cache_position.device)
+            # If there are no image tokens, don't enable the special mask path.
+            # This avoids requiring torch>=2.6 for text-only prompts where token_type_ids is present but all zeros.
+            if bool(is_image.any().item()):
+                # `or_mask_function` / `and_mask_function` require torch>=2.6
+                if Version(torch.__version__.split("+", 1)[0]) < Version("2.6"):
+                    raise RuntimeError(
+                        "Gemma3/MedGemma multimodal attention masks require torch>=2.6 on the worker. "
+                        f"Detected torch=={torch.__version__}. Please upgrade the worker image / PyTorch."
+                    )
             new_image_start = is_image & ~nn.functional.pad(is_image, (1, 0), value=0)[:, :-1]
             image_group_ids = torch.cumsum(new_image_start.int(), dim=1) - 1
             image_group_ids = torch.where(is_image, image_group_ids, torch.full_like(token_type_ids, -1))
-            mask_kwargs["or_mask_function"] = token_type_ids_mask_function(
-                token_type_ids.to(cache_position.device), image_group_ids.to(cache_position.device), self.mm_tokens_per_image
-            )
+            if bool(is_image.any().item()):
+                mask_kwargs["or_mask_function"] = token_type_ids_mask_function(
+                    token_type_ids.to(cache_position.device),
+                    image_group_ids.to(cache_position.device),
+                    self.mm_tokens_per_image,
+                )
 
         causal_mask_mapping = {
             "full_attention": create_causal_mask(**mask_kwargs),

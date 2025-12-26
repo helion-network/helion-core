@@ -39,9 +39,11 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 &
 RUN pip install --upgrade pip setuptools wheel
 
 # Install CPU-only PyTorch and dependencies for x86_64
-# PyTorch 2.1.2 supports x86_64 on Linux
-RUN pip install --no-cache-dir torch==2.1.2 && \
-    pip install --no-cache-dir "transformers>=4.55.0,<4.56.0"
+# PyTorch 2.6 supports x86_64 on Linux with FP16 support
+RUN pip install --no-cache-dir torch==2.6.0 && \
+    pip install --no-cache-dir "transformers>=4.55.0,<4.56.0" && \
+    pip install --no-cache-dir "accelerate>=0.30.0" && \
+    pip install --no-cache-dir "peft>=0.10.0"
 
 VOLUME /cache
 ENV HELION_CACHE=/cache
@@ -62,11 +64,11 @@ RUN pip install --no-cache-dir \
 
 # HuggingFace ecosystem
 RUN pip install --no-cache-dir \
-    "huggingface-hub>=0.11.1,<1.0.0" \
-    "safetensors>=0.3.1" \
-    "tokenizers>=0.13.3" \
-    "accelerate>=0.27.2" \
-    "peft==0.8.2"
+    "huggingface-hub>=0.20.0,<1.0.0" \
+    "safetensors>=0.4.0" \
+    "tokenizers>=0.15.0" \
+    "accelerate>=0.30.0" \
+    "peft>=0.10.0"
 
 # Text processing
 RUN pip install --no-cache-dir \

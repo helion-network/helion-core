@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import dataclasses
 from contextvars import ContextVar
@@ -7,7 +8,6 @@ import torch
 import transformers
 from hivemind.utils.logging import get_logger
 from torch import Tensor
-from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation.utils import ModelOutput
 
 from helion.client.inference_session import InferenceSession
@@ -17,28 +17,36 @@ from helion.utils.misc import DUMMY, docstring_from
 logger = get_logger(__name__)
 
 
-class RemotePastKeyValues(Cache):
-    """only keeps the number of seen tokens. pretends to be a legit cache"""
+@dataclasses.dataclass
+class RemotePastKeyValues:
+    """
+    A minimal, version-agnostic cache object for Transformers generation.
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._seen_tokens = 0
-        self.hypo_ids: Optional[torch.LongTensor] = None
+    We intentionally do NOT inherit from `transformers.cache_utils.Cache` because its constructor and
+    invariants vary across Transformers versions (and may require per-layer cache classes).
+
+    This object only tracks the number of seen tokens and stores `hypo_ids` for beam-search plumbing.
+    """
+
+    _seen_tokens: int = 0
+    hypo_ids: Optional[torch.LongTensor] = None
 
     def __getitem__(self, _index: int) -> List[torch.Tensor]:
         return [DUMMY]  # For compatibility with BloomForCausalLM.prepare_inputs_for_generation()
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        return self._seen_tokens
+        return int(self._seen_tokens)
 
     def get_max_length(self) -> Optional[int]:
         return None
 
     def update_seen(self, new_seen: int) -> None:
-        self._seen_tokens += new_seen
+        self._seen_tokens += int(new_seen)
 
     def reorder_cache(self, beam_idx):
-        raise NotImplementedError("Beam search reordering is not implemented yet")
+        # Some Transformers versions call `past_key_values.reorder_cache(...)` instead of model._reorder_cache.
+        self.hypo_ids = beam_idx
+        return self
 
 
 _skipped_tokens = ContextVar("skipped_tokens", default=0)
@@ -129,12 +137,41 @@ class RemoteGenerationMixin(_SkipTokensMixin):
                 # but keep them for transformers.GenerationMixin (e.g., to compute repetition_penalty)
                 _skipped_tokens.set(max(0, n_prev_tokens - 1))
 
-            if self._supports_cache_class and "past_key_values" not in kwargs:
-                past_key_values = RemotePastKeyValues()
-                past_key_values.update_seen(session.position)
-                kwargs["past_key_values"] = past_key_values
+            # transformers.GenerationMixin validates model_kwargs against the model's forward signature.
+            # Some tokenizers (and gateways) pass extra keys such as token_type_ids; some models ignore attention_mask.
+            # If that happens, retry generation with the unused kwargs removed.
+            try:
+                result = super().generate(inputs, *args, **kwargs)
+            except ValueError as e:
+                msg = str(e)
+                needle = "The following `model_kwargs` are not used by the model:"
+                if needle not in msg:
+                    raise
 
-            result = super().generate(inputs, *args, **kwargs)
+                # Example msg:
+                # "The following `model_kwargs` are not used by the model: ['attention_mask', 'token_type_ids'] (note: ...)"
+                unused_part = msg.split(needle, 1)[1]
+                unused_part = unused_part.split("(note:", 1)[0].strip()
+                try:
+                    unused_keys = ast.literal_eval(unused_part)
+                except Exception:
+                    raise
+
+                if not isinstance(unused_keys, (list, tuple)) or not all(isinstance(k, str) for k in unused_keys):
+                    raise
+
+                filtered_kwargs = dict(kwargs)
+                removed = []
+                for key in unused_keys:
+                    if key in filtered_kwargs:
+                        removed.append(key)
+                        filtered_kwargs.pop(key, None)
+
+                if not removed:
+                    raise
+
+                logger.warning(f"Retrying .generate() with unsupported model_kwargs removed: {removed}")
+                result = super().generate(inputs, *args, **filtered_kwargs)
 
             sequences = result.sequences if isinstance(result, ModelOutput) else result
             # Save tokens from this .generate() call

@@ -23,9 +23,14 @@ RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkg
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 
 RUN conda install -y python~=3.10.12 pip && \
-    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu118 torch==2.1.2 && \
-    pip install --no-cache-dir bitsandbytes==0.41.3 && \
+    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu118 torch==2.6.0+cu118 && \
+    # bitsandbytes 0.41.3 requires triton.ops which was removed in Triton 3.x.
+    # Pin triton to 2.x to maintain compatibility with bitsandbytes quantization.
+    pip install --no-cache-dir "triton>=2.0.0,<3.0.0" && \
+    pip install --no-cache-dir bitsandbytes>=0.41.3 && \
     pip install --no-cache-dir "transformers>=4.55.0,<4.56.0" && \
+    pip install --no-cache-dir "accelerate>=0.30.0" && \
+    pip install --no-cache-dir "peft>=0.10.0" && \
     conda clean --all && rm -rf ~/.cache/pip
 
 VOLUME /cache

@@ -141,9 +141,24 @@ class DistributedGemma3Model(FromPretrainedMixin, PTuneMixin, Gemma3Model):
 
         hidden_states = inputs_embeds
 
+        # transformers generation may pass its own cache objects (e.g. DynamicCache/Cache) here.
+        # Convert them into RemotePastKeyValues, which is what RemoteSequential expects.
         if past_key_values is None:
             past_key_values = RemotePastKeyValues()
-        assert isinstance(past_key_values, RemotePastKeyValues), "Distributed Gemma3 expects RemotePastKeyValues"
+        elif not isinstance(past_key_values, RemotePastKeyValues):
+            converted = RemotePastKeyValues()
+            # Best-effort: preserve "seen tokens" so cache_position stays consistent.
+            try:
+                converted.update_seen(int(past_key_values.get_seq_length()))  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            # Best-effort: preserve beam search bookkeeping if present.
+            try:
+                converted.hypo_ids = getattr(past_key_values, "hypo_ids", None)
+            except Exception:
+                pass
+            past_key_values = converted
+        assert isinstance(past_key_values, RemotePastKeyValues)
 
         # If no active inference session is present, we cannot pass extra kwargs to RemoteSequential.
         tt_ids = token_type_ids if self.h.active_session is not None else None
