@@ -131,25 +131,33 @@ class OptimizedQwen3Attention(Qwen3Attention):
                     f"to ensure compatibility. This may be due to tensor parallelism."
                 )
         
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        # For key/value, use head_dim_to_use to match the cache if there's a mismatch
-        # The projection outputs num_key_value_heads * self.head_dim total dimensions
-        # If head_dim_to_use differs, we need to recalculate how many heads we have
+        # Use head_dim_to_use for all states to ensure consistency
+        # If cache has different head_dim, we need to use it for query, key, and value
+        q_output_size = query_states.shape[-1]
         kv_output_size = key_states.shape[-1]
+        
         if head_dim_to_use != self.head_dim:
-            # Recalculate num_key_value_heads based on actual output and target head_dim
+            # Recalculate num_heads and num_key_value_heads based on actual output and target head_dim
             # This handles tensor parallelism where head_dim is split
+            actual_num_heads = q_output_size // head_dim_to_use
             actual_num_kv_heads = kv_output_size // head_dim_to_use
+            if actual_num_heads * head_dim_to_use != q_output_size:
+                raise ValueError(
+                    f"Cannot reshape query states: output_size={q_output_size} is not divisible by "
+                    f"head_dim_to_use={head_dim_to_use}. Cache head_dim={past_key_head_dim}, "
+                    f"model head_dim={self.head_dim}"
+                )
             if actual_num_kv_heads * head_dim_to_use != kv_output_size:
                 raise ValueError(
                     f"Cannot reshape key/value states: output_size={kv_output_size} is not divisible by "
                     f"head_dim_to_use={head_dim_to_use}. Cache head_dim={past_key_head_dim}, "
                     f"model head_dim={self.head_dim}"
                 )
+            query_states = query_states.view(bsz, q_len, actual_num_heads, head_dim_to_use).transpose(1, 2)
             key_states = key_states.view(bsz, q_len, actual_num_kv_heads, head_dim_to_use).transpose(1, 2)
             value_states = value_states.view(bsz, q_len, actual_num_kv_heads, head_dim_to_use).transpose(1, 2)
         else:
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
             key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
@@ -178,7 +186,8 @@ class OptimizedQwen3Attention(Qwen3Attention):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        # Use head_dim_to_use for scaling to match the actual head_dim being used
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim_to_use)
 
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
