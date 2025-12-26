@@ -349,14 +349,45 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
         self, key_value: Tuple[torch.Tensor], batch_size: int, seq_length: int
     ) -> Tuple[torch.Tensor]:
         key_states, value_states = key_value
-        key_states = key_states.permute(0, 2, 1)
+        # Bloom format: key is [B*Hkv, D, T], value is [B*Hkv, T, D]
         num_kv_heads = self._get_num_kv_heads()
-        # Infer actual sequence length from tensor shape after permuting
-        # After permute: key_states is [B*Hkv, T, D], so shape[1] is the actual sequence length
-        # This fixes shape mismatches when the passed seq_length doesn't match the actual cache size
-        actual_seq_length = key_states.shape[1]
-        key_states = key_states.view(batch_size, num_kv_heads, actual_seq_length, self.self_attn.head_dim)
-        value_states = value_states.view(batch_size, num_kv_heads, actual_seq_length, self.self_attn.head_dim)
+        head_dim = self.self_attn.head_dim
+        
+        # Use value_states to infer dimensions since it's already in [B*Hkv, T, D] format
+        # This is more reliable than using key_states which needs permute
+        batch_kv_heads = value_states.shape[0]  # B*Hkv
+        actual_seq_length = value_states.shape[1]  # T (sequence length)
+        actual_head_dim = value_states.shape[2]  # D
+        
+        # Verify head_dim matches
+        if actual_head_dim != head_dim:
+            raise ValueError(
+                f"Head dimension mismatch: expected {head_dim}, got {actual_head_dim} "
+                f"from value_states shape {value_states.shape}"
+            )
+        
+        # Infer batch_size from tensor shape
+        # batch_kv_heads should equal batch_size * num_kv_heads
+        if batch_kv_heads % num_kv_heads != 0:
+            raise ValueError(
+                f"Cannot infer batch_size: batch_kv_heads={batch_kv_heads} is not divisible by "
+                f"num_kv_heads={num_kv_heads}. Value states shape: {value_states.shape}"
+            )
+        inferred_batch_size = batch_kv_heads // num_kv_heads
+        
+        # Permute key_states from [B*Hkv, D, T] to [B*Hkv, T, D]
+        key_states = key_states.permute(0, 2, 1)
+        
+        # Verify key_states matches value_states shape after permute
+        if key_states.shape != value_states.shape:
+            raise ValueError(
+                f"Key and value states shape mismatch after permute: "
+                f"key_states.shape={key_states.shape}, value_states.shape={value_states.shape}"
+            )
+        
+        # Reshape using inferred dimensions
+        key_states = key_states.view(inferred_batch_size, num_kv_heads, actual_seq_length, head_dim)
+        value_states = value_states.view(inferred_batch_size, num_kv_heads, actual_seq_length, head_dim)
         return (key_states, value_states)
 
     def _reorder_cache_from_qwen3_to_bloom(
