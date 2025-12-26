@@ -96,7 +96,9 @@ class TransformerBackend(ModuleBackend):
 
     def get_inference_cache_descriptors(self, batch_size: int, max_length: int) -> Sequence[TensorDescriptor]:
         """Create tensor descriptors for attention cache tensors used during inference_step"""
-        head_dim = self.config.hidden_size // self.config.num_attention_heads
+        # Prefer explicit head_dim if provided by the model config (e.g., Qwen3),
+        # otherwise fall back to hidden_size // num_attention_heads.
+        head_dim = int(getattr(self.config, "head_dim", self.config.hidden_size // self.config.num_attention_heads))
         cache_tensors = []
         for device, num_heads in zip(self.module.devices, self.shard_num_heads):
             num_heads //= self.config.num_key_value_groups
