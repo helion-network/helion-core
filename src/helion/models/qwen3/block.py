@@ -4,7 +4,6 @@ Based on Llama implementation pattern, adapted for Qwen3 architecture.
 Qwen3 uses a Llama-like architecture with similar structure.
 """
 import math
-import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -118,96 +117,19 @@ class OptimizedQwen3Attention(Qwen3Attention):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
 
-        # Reshape q/k/v in a way that's consistent with the *actual cache layout* when cache is present.
-        #
-        # In Helion's tensor-parallel runtime, the backend allocates KV cache per-shard using:
-        #  - kv_heads_per_shard = shard_num_heads // num_key_value_groups
-        #  - head_dim = config.hidden_size // config.num_attention_heads
-        #
-        # However, transformers modules may still carry global head counts. To avoid mismatches like
-        # cache(Hkv=8,D=64) vs projection(Hkv=16,D=64), we:
-        #  - when cache exists: force kv_heads/head_dim to match cache, and slice projection outputs if needed
-        #  - otherwise: fall back to config/module attributes
-        q_out = int(query_states.shape[-1])
-        kv_out = int(key_states.shape[-1])
-
-        if past_key_value is not None:
-            cache_kv_heads = int(past_key_value[0].shape[1])
-            cache_head_dim = int(past_key_value[0].shape[-1])
-            # Derive the number of query heads from the actual projection/output width expected by o_proj.
-            # Under tensor-parallel sharding, this is the per-shard hidden size.
-            proj_hidden = int(getattr(self.o_proj, "in_features", self.hidden_size))
-            if proj_hidden % cache_head_dim != 0:
-                raise RuntimeError(
-                    "Cannot infer query heads from o_proj.in_features and cache_head_dim: "
-                    f"o_proj.in_features={proj_hidden}, cache_head_dim={cache_head_dim}"
-                )
-            q_heads = proj_hidden // cache_head_dim
-            q_needed = q_heads * cache_head_dim
-            kv_needed = cache_kv_heads * cache_head_dim
-
-            if q_out < q_needed or kv_out < kv_needed:
-                raise RuntimeError(
-                    "Projection output is smaller than required by cache layout: "
-                    f"q_out={q_out}, need={q_needed}; kv_out={kv_out}, need={kv_needed}; "
-                    f"cache_kv_heads={cache_kv_heads}, cache_head_dim={cache_head_dim}"
-                )
-
-            if q_out != q_needed:
-                warnings.warn(
-                    f"Slicing q_proj output from {q_out} -> {q_needed} to match cache layout "
-                    f"(q_heads={q_heads}, head_dim={cache_head_dim})"
-                )
-                query_states = query_states[..., :q_needed]
-
-            if kv_out != kv_needed:
-                warnings.warn(
-                    f"Slicing k/v_proj output from {kv_out} -> {kv_needed} to match cache layout "
-                    f"(kv_heads={cache_kv_heads}, head_dim={cache_head_dim})"
-                )
-                key_states = key_states[..., :kv_needed]
-                value_states = value_states[..., :kv_needed]
-
-            head_dim_to_use = cache_head_dim
-            kv_heads = cache_kv_heads
-        else:
-            # No cache: infer from module/config attributes.
-            head_dim_to_use = int(getattr(self, "head_dim", self.config.hidden_size // self.config.num_attention_heads))
-            q_heads = int(getattr(self, "num_heads", self.config.num_attention_heads))
-            kv_heads = int(getattr(self, "num_key_value_heads", max(1, q_heads // int(getattr(self, "num_key_value_groups", 1)))))
-
-        # Final reshape to [B, H, T, D]
-        query_states = query_states.view(bsz, q_len, q_heads, head_dim_to_use).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, kv_heads, head_dim_to_use).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, kv_heads, head_dim_to_use).transpose(1, 2)
+        # Single-GPU, config-consistent reshape
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         # HF>=4.45: Use externally provided position embeddings if available, otherwise compute internally
         if position_embeddings is not None:
             cos, sin = position_embeddings
             cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
         else:
-            # Fallback for legacy callers
+            # Compute RoPE from the actual value_states shape
             cos, sin = self.rotary_emb(value_states, position_ids)
             cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-
-        # In some distributed / tensor-parallel setups, the KV cache (and thus q/k/v) can end up with a different
-        # per-head dimension than config-derived rotary embeddings. Align RoPE tensors to the actual q/k head_dim.
-        q_head_dim = query_states.shape[-1]
-        rope_head_dim = cos.shape[-1]
-        if rope_head_dim != q_head_dim:
-            # Slice to the common head dim to avoid runtime shape errors in apply_rotary_pos_emb.
-            common = min(rope_head_dim, q_head_dim)
-            if common <= 0:
-                raise ValueError(
-                    f"Invalid RoPE head_dim alignment: q_head_dim={q_head_dim}, rope_head_dim={rope_head_dim}, "
-                    f"query_states.shape={query_states.shape}, cos.shape={cos.shape}"
-                )
-            if rope_head_dim != common:
-                cos = cos[..., :common]
-                sin = sin[..., :common]
-            if q_head_dim != common:
-                query_states = query_states[..., :common]
-                key_states = key_states[..., :common]
 
         if q_len == 1 and torch.is_inference_mode_enabled() and hidden_states.device.type == "cuda":
             query_states, key_states = self._optimized_apply_rotary(query_states, key_states, cos, sin)
@@ -216,37 +138,16 @@ class OptimizedQwen3Attention(Qwen3Attention):
 
         if past_key_value is not None:
             # reuse k, v, self_attention
-            past_k, past_v = past_key_value
-            # past/new are expected to be [B, Hkv, T, D]. In some tensor-parallel/distributed scenarios,
-            # (Hkv, D) can differ between cache and current projections while keeping the total per-token
-            # width (Hkv * D) constant (e.g. 8*128 vs 16*64). If so, reinterpret the cache to match current.
-            if past_k.shape[1] != key_states.shape[1] or past_k.shape[3] != key_states.shape[3]:
-                past_width = int(past_k.shape[1]) * int(past_k.shape[3])
-                curr_width = int(key_states.shape[1]) * int(key_states.shape[3])
-                if past_width != curr_width:
-                    raise RuntimeError(
-                        "Incompatible KV cache layout: "
-                        f"past(H={past_k.shape[1]},D={past_k.shape[3]}) vs "
-                        f"curr(H={key_states.shape[1]},D={key_states.shape[3]}), "
-                        f"widths {past_width} != {curr_width}"
-                    )
-                # Ensure contiguous before view/reshape
-                past_k = past_k.contiguous().reshape(bsz, key_states.shape[1], past_k.shape[2], key_states.shape[3])
-                past_v = past_v.contiguous().reshape(bsz, value_states.shape[1], past_v.shape[2], value_states.shape[3])
-
-            key_states = torch.cat([past_k, key_states], dim=2)
-            value_states = torch.cat([past_v, value_states], dim=2)
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
         past_key_value = (key_states, value_states) if use_cache else None
 
         # repeat k/v heads if n_kv_heads < n_heads
-        # Compute replication factor from actual head counts (more robust under tensor-parallel reshapes)
-        n_rep = query_states.shape[1] // key_states.shape[1]
-        key_states = repeat_kv(key_states, n_rep)
-        value_states = repeat_kv(value_states, n_rep)
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        # Use head_dim_to_use for scaling to match the actual head_dim being used
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim_to_use)
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
@@ -388,9 +289,10 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
 
         past_key_value = layer_past
         if past_key_value is not None:
-            # Infer sequence length from value tensor which is [B*Hkv, T, D] in Bloom format
-            # This is more reliable than using key tensor shape[2]
-            past_key_values_length = past_key_value[1].shape[1]
+            # Helion uses bloom-shaped KV caches:
+            # - key:   [B*Hkv, D, T]
+            # - value: [B*Hkv, T, D]
+            past_key_values_length = int(past_key_value[0].shape[-1])
             seq_length_with_past = seq_length_with_past + past_key_values_length
             past_key_value = self._reorder_cache_from_bloom_to_qwen3(past_key_value, batch_size, past_key_values_length)
 
@@ -400,12 +302,7 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
         position_ids = torch.arange(
             past_key_values_length, past_key_values_length + seq_length, device=hidden_states.device
         ).unsqueeze(0)
-        # IMPORTANT:
-        # Don't compute RoPE position embeddings externally here.
-        # In distributed / tensor-parallel setups, the KV cache head_dim can differ from config.head_dim.
-        # If we build (cos,sin) using a config-derived head_dim, it can mismatch q/k head_dim at runtime
-        # (e.g. 64 vs 128) and crash in apply_rotary_pos_emb.
-        # OptimizedQwen3Attention.forward() will compute RoPE internally from the actual value_states shape.
+        # Compute RoPE inside attention (single GPU, consistent head_dim)
         position_embeddings = None
 
         # embed positions
@@ -445,63 +342,44 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
     ) -> Tuple[torch.Tensor]:
         key_states, value_states = key_value
         # Bloom format: key is [B*Hkv, D, T], value is [B*Hkv, T, D]
+        # Qwen3 attention expects past_key_value as [B, Hkv, T, D]
         num_kv_heads = self._get_num_kv_heads()
-        head_dim = self.self_attn.head_dim
-        
-        # Use value_states to infer dimensions since it's already in [B*Hkv, T, D] format
-        # This is more reliable than using key_states which needs permute
-        batch_kv_heads = value_states.shape[0]  # B*Hkv
-        actual_seq_length = value_states.shape[1]  # T (sequence length)
-        actual_head_dim = value_states.shape[2]  # D
-        
-        # Use actual head_dim from tensor instead of expected head_dim
-        # This handles cases with tensor parallelism or different cache formats
-        # If there's a mismatch, log a warning but use the tensor's actual dimension
-        if actual_head_dim != head_dim:
-            warnings.warn(
-                f"Head dimension mismatch: expected {head_dim}, using actual {actual_head_dim} "
-                f"from value_states shape {value_states.shape}. This may be due to tensor parallelism."
-            )
-        head_dim_to_use = actual_head_dim
-        
-        # Infer batch_size from tensor shape
-        # batch_kv_heads should equal batch_size * num_kv_heads
-        if batch_kv_heads % num_kv_heads != 0:
-            raise ValueError(
-                f"Cannot infer batch_size: batch_kv_heads={batch_kv_heads} is not divisible by "
-                f"num_kv_heads={num_kv_heads}. Value states shape: {value_states.shape}"
-            )
-        inferred_batch_size = batch_kv_heads // num_kv_heads
-        
-        # Permute key_states from [B*Hkv, D, T] to [B*Hkv, T, D]
-        key_states = key_states.permute(0, 2, 1)
-        
-        # Verify key_states matches value_states shape after permute
-        if key_states.shape != value_states.shape:
-            raise ValueError(
-                f"Key and value states shape mismatch after permute: "
-                f"key_states.shape={key_states.shape}, value_states.shape={value_states.shape}"
-            )
-        
-        # Reshape using inferred dimensions (use actual head_dim from tensor)
-        key_states = key_states.view(inferred_batch_size, num_kv_heads, actual_seq_length, head_dim_to_use)
-        value_states = value_states.view(inferred_batch_size, num_kv_heads, actual_seq_length, head_dim_to_use)
-        return (key_states, value_states)
+        head_dim = int(self.self_attn.head_dim)
+
+        assert key_states.dim() == 3 and value_states.dim() == 3
+        assert int(key_states.shape[0]) == int(value_states.shape[0])
+        assert int(key_states.shape[2]) == int(value_states.shape[2]) == head_dim
+
+        # Infer seq_len from actual tensors
+        t = int(value_states.shape[1])
+        assert int(key_states.shape[-1]) == t
+        if seq_length is not None:
+            assert int(seq_length) == t
+
+        # Infer kv heads from first dimension and batch_size
+        assert int(key_states.shape[0]) == int(batch_size) * int(num_kv_heads)
+
+        key_states = key_states.permute(0, 2, 1).contiguous()  # [B*Hkv, T, D]
+        value_states = value_states.contiguous()  # [B*Hkv, T, D]
+        key_states = key_states.view(batch_size, num_kv_heads, t, head_dim)
+        value_states = value_states.view(batch_size, num_kv_heads, t, head_dim)
+        return key_states, value_states
 
     def _reorder_cache_from_qwen3_to_bloom(
         self, key_value: Tuple[torch.Tensor], batch_size: int, seq_length: int
     ) -> Tuple[torch.Tensor]:
         key_states, value_states = key_value
-        num_kv_heads = self._get_num_kv_heads()
-        # Infer actual sequence length from tensor shape to avoid shape mismatches
-        # key_states and value_states are [B, Hkv, T, D], so shape[2] is the sequence length
-        actual_seq_length = key_states.shape[2]
-        # Infer head_dim from the actual tensor (robust under TP / cache head_dim overrides)
-        head_dim = int(value_states.shape[-1])
-        value_states = value_states.view(batch_size * num_kv_heads, actual_seq_length, head_dim)
-        key_states = key_states.view(*value_states.shape)
-        key_states = key_states.permute(0, 2, 1)
-        return (key_states, value_states)
+        # Qwen3 past_key_value: [B, Hkv, T, D] -> Helion Bloom:
+        # - key:   [B*Hkv, D, T]
+        # - value: [B*Hkv, T, D]
+        bsz, hkv, t, d = key_states.shape
+        assert int(bsz) == int(batch_size)
+        assert value_states.shape == (bsz, hkv, t, d)
+        assert int(d) == int(self.self_attn.head_dim)
+
+        value_states = value_states.contiguous().view(bsz * hkv, t, d)
+        key_states = key_states.contiguous().view(bsz * hkv, t, d).permute(0, 2, 1).contiguous()
+        return key_states, value_states
 
     def _get_num_kv_heads(self) -> int:
         num_kv_heads = getattr(self.self_attn, "num_key_value_heads", None)

@@ -21,6 +21,13 @@ Helion supports a fixed set of Hugging Face *model types* (architectures). You c
 
 If you pass a model id whose `model_type` is not in the supported list, Helion will fail with an error like “Petals does not support model type …”.
 
+## Operational note: clearing worker cache after upgrades
+
+If you upgrade Helion after hitting **KV-cache / shape errors** (especially on **Qwen3**), restart your workers and remove any persisted cache directory so you don’t reuse stale KV caches created by older code.
+
+- Docker Compose workers: stop the worker containers and delete `compose/worker/helion-cache/`
+- Then start the workers again so caches are rebuilt with the updated tensor layouts
+
 ## Quickstart: Python client
 ```python
 from helion.utils.auto_config import AutoDistributedConfig
