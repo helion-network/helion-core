@@ -348,7 +348,12 @@ class WrappedQwen3Block(OptimizedQwen3DecoderLayer):
 
         assert key_states.dim() == 3 and value_states.dim() == 3
         assert int(key_states.shape[0]) == int(value_states.shape[0])
-        assert int(key_states.shape[2]) == int(value_states.shape[2]) == head_dim
+        # key: [B*Hkv, D, T] and value: [B*Hkv, T, D]
+        assert int(key_states.shape[1]) == head_dim, f"expected key D={head_dim}, got {key_states.shape}"
+        assert int(value_states.shape[2]) == head_dim, f"expected value D={head_dim}, got {value_states.shape}"
+        assert int(key_states.shape[2]) == int(value_states.shape[1]), (
+            f"expected key T == value T, got key={key_states.shape}, value={value_states.shape}"
+        )
 
         # Infer seq_len from actual tensors
         t = int(value_states.shape[1])
