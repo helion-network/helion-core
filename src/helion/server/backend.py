@@ -184,11 +184,19 @@ class TransformerBackend(ModuleBackend):
             # Flatten cache: [batch, num_kv_heads, seq_len, head_dim] -> [batch*num_kv_heads, seq_len, head_dim]
             key_flat = key_cache[i].flatten(0, 1)
             value_flat = value_cache[i].flatten(0, 1)
-            # Get actual sequence length from cache shape
-            # Key shape after flatten: [batch*num_kv_heads, head_dim, seq_len] (bloom format)
+            # Get actual sequence length from value cache shape (more reliable than key cache which may be in bloom format)
             # Value shape after flatten: [batch*num_kv_heads, seq_len, head_dim]
             # For value cache, seq_len is at index 1
-            actual_seq_len = value_flat.shape[1] if len(value_flat.shape) >= 2 else 0
+            if len(value_flat.shape) >= 2:
+                actual_seq_len = value_flat.shape[1]
+            elif len(key_flat.shape) == 3:
+                # Key is in bloom format: [B*Hkv, D, T], so T is at index 2
+                actual_seq_len = key_flat.shape[2]
+            else:
+                # Fallback: try to infer from total elements
+                # Assume we know batch_size and num_kv_heads from context, but we don't have them here
+                # So we'll use the shape-based approach
+                actual_seq_len = value_flat.shape[1] if len(value_flat.shape) >= 2 else key_flat.shape[-1] if len(key_flat.shape) >= 1 else 0
             # Clamp prefix_length to actual cache size to avoid shape mismatches
             safe_prefix_length = min(prefix_length, actual_seq_len) if actual_seq_len > 0 else prefix_length
             if safe_prefix_length != prefix_length and actual_seq_len > 0:
@@ -200,11 +208,16 @@ class TransformerBackend(ModuleBackend):
             # For value: [batch*num_kv_heads, seq_len, head_dim] -> slice to [:, :safe_prefix_length, :]
             if len(key_flat.shape) == 3:
                 # Key is in bloom format: [B*Hkv, D, T]
-                key_cache[i] = key_flat[:, :, :safe_prefix_length]
+                # Ensure we don't slice beyond actual size
+                max_slice = min(safe_prefix_length, key_flat.shape[2])
+                key_cache[i] = key_flat[:, :, :max_slice]
             else:
                 # Fallback for other formats
-                key_cache[i] = key_flat[:, :safe_prefix_length]
-            value_cache[i] = value_flat[:, :safe_prefix_length]
+                max_slice = min(safe_prefix_length, key_flat.shape[1] if len(key_flat.shape) >= 2 else safe_prefix_length)
+                key_cache[i] = key_flat[:, :max_slice]
+            # Ensure value slice doesn't exceed actual size
+            max_value_slice = min(safe_prefix_length, value_flat.shape[1] if len(value_flat.shape) >= 2 else safe_prefix_length)
+            value_cache[i] = value_flat[:, :max_value_slice]
             # Final shape: key [batch * num_kv_heads, head_dim, kv_length] (bloom format)
             # Final shape: value [batch * num_kv_heads, kv_length, head_dim]
         layer_past = tuple(chain(*zip(key_cache, value_cache)))
