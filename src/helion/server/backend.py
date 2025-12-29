@@ -143,9 +143,15 @@ class TransformerBackend(ModuleBackend):
             if token_type_ids is not None and not is_dummy(token_type_ids) and hidden_states.shape[1] > 1:
                 max_chunk_length = hidden_states.shape[1]
             output_hidden_states = torch.empty_like(hidden_states) if seq_len > max_chunk_length else None
-            layer_past = self._select_layer_past(cache_tensors, inference_info.prefix_length)
+            layer_past, actual_prefix_length = self._select_layer_past(cache_tensors, inference_info.prefix_length)
+            
+            # Track actual cache size - start with what we selected from cache
+            # This may be less than prefix_length if cache was truncated
+            actual_cache_size = actual_prefix_length
+            
             for offset in range(0, seq_len, max_chunk_length):
-                hidden_states_chunk = hidden_states[:, offset : offset + max_chunk_length, :]
+                chunk_length = min(max_chunk_length, seq_len - offset)
+                hidden_states_chunk = hidden_states[:, offset : offset + chunk_length, :]
                 if token_type_ids is not None and not is_dummy(token_type_ids):
                     output_hidden_states_chunk, new_kvs = self.module.forward(
                         hidden_states_chunk, layer_past=layer_past, use_cache=True, token_type_ids=token_type_ids
@@ -155,13 +161,37 @@ class TransformerBackend(ModuleBackend):
                         hidden_states_chunk, layer_past=layer_past, use_cache=True
                     )
                 if seq_len > max_chunk_length:
-                    output_hidden_states[:, offset : offset + max_chunk_length] = output_hidden_states_chunk
+                    output_hidden_states[:, offset : offset + chunk_length] = output_hidden_states_chunk
                 else:
                     output_hidden_states = output_hidden_states_chunk  # saves one memcopy
                 layer_past = new_kvs
+                
+                # Check if cache was truncated by examining the returned cache size
+                # new_kvs[0] is key cache in bloom format: [B*Hkv, D, T]
+                if new_kvs and len(new_kvs) >= 2:
+                    returned_key = new_kvs[0]
+                    if len(returned_key.shape) == 3:
+                        # Bloom format: [B*Hkv, D, T], T is at index 2
+                        returned_cache_size = int(returned_key.shape[2])
+                        # Expected size after processing this chunk
+                        expected_size = actual_cache_size + chunk_length
+                        # If returned size is less than expected, truncation occurred
+                        if returned_cache_size < expected_size:
+                            # Calculate what the actual cache size was before this chunk
+                            actual_cache_size = returned_cache_size - chunk_length
+                            logger.debug(
+                                f"Detected cache truncation: actual cache size is {actual_cache_size} "
+                                f"(expected {inference_info.prefix_length + offset})"
+                            )
+                        else:
+                            # Update actual_cache_size to reflect the new chunk
+                            actual_cache_size = returned_cache_size
 
-            self._update_cache_inplace(cache_tensors, new_kvs, inference_info.prefix_length)
-            return (output_hidden_states,)
+            # Use actual_cache_size for cache update to ensure consistency
+            self._update_cache_inplace(cache_tensors, new_kvs, actual_cache_size)
+            
+            # Return both hidden_states and actual_cache_size so caller can update prefix_length
+            return (output_hidden_states, actual_cache_size)
 
     def _estimate_max_chunk_length(self, hidden_states: torch.Tensor, inference_info: InferenceMetadata) -> int:
         # We assume that attention logit matrices are the main thing that consumes memory, given that
@@ -177,51 +207,80 @@ class TransformerBackend(ModuleBackend):
             for cache_tensor in cache_tensors:
                 cache_tensor[...] = cache_tensor[hypo_ids.to(cache_tensor.device)]  # in-place reorder cache by hypo ids
 
-    def _select_layer_past(self, cache_tensors: Sequence[torch.Tensor], prefix_length: int) -> Sequence[torch.Tensor]:
-        """Extract first {prefix_length} tokens and reshape them such that they can be used as layer_past"""
+    def _select_layer_past(self, cache_tensors: Sequence[torch.Tensor], prefix_length: int) -> Tuple[Sequence[torch.Tensor], int]:
+        """
+        Extract first {prefix_length} tokens and reshape them such that they can be used as layer_past.
+        Returns (layer_past, actual_selected_length) where actual_selected_length is the actual number
+        of tokens selected (may be less than prefix_length if cache is truncated).
+        """
         key_cache, value_cache = list(cache_tensors[0::2]), list(cache_tensors[1::2])
+        min_actual_seq_len = None
+        
         for i in range(len(key_cache)):
             # Flatten cache: [batch, num_kv_heads, seq_len, head_dim] -> [batch*num_kv_heads, seq_len, head_dim]
             key_flat = key_cache[i].flatten(0, 1)
             value_flat = value_cache[i].flatten(0, 1)
+            
             # Get actual sequence length from value cache shape (more reliable than key cache which may be in bloom format)
             # Value shape after flatten: [batch*num_kv_heads, seq_len, head_dim]
             # For value cache, seq_len is at index 1
             if len(value_flat.shape) >= 2:
-                actual_seq_len = value_flat.shape[1]
+                actual_seq_len = int(value_flat.shape[1])
             elif len(key_flat.shape) == 3:
                 # Key is in bloom format: [B*Hkv, D, T], so T is at index 2
-                actual_seq_len = key_flat.shape[2]
+                actual_seq_len = int(key_flat.shape[2])
             else:
                 # Fallback: try to infer from total elements
-                # Assume we know batch_size and num_kv_heads from context, but we don't have them here
-                # So we'll use the shape-based approach
                 actual_seq_len = value_flat.shape[1] if len(value_flat.shape) >= 2 else key_flat.shape[-1] if len(key_flat.shape) >= 1 else 0
+                actual_seq_len = int(actual_seq_len)
+            
+            # Track minimum actual sequence length across all layers
+            if min_actual_seq_len is None:
+                min_actual_seq_len = actual_seq_len
+            else:
+                min_actual_seq_len = min(min_actual_seq_len, actual_seq_len)
+            
             # Clamp prefix_length to actual cache size to avoid shape mismatches
             safe_prefix_length = min(prefix_length, actual_seq_len) if actual_seq_len > 0 else prefix_length
+            
             if safe_prefix_length != prefix_length and actual_seq_len > 0:
                 logger.warning(
                     f"Cache prefix_length mismatch: requested {prefix_length} but cache only has {actual_seq_len} tokens. "
                     f"Using {safe_prefix_length} instead."
                 )
+            
             # For key: [batch*num_kv_heads, head_dim, seq_len] -> slice to [:,:,:safe_prefix_length]
             # For value: [batch*num_kv_heads, seq_len, head_dim] -> slice to [:, :safe_prefix_length, :]
             if len(key_flat.shape) == 3:
                 # Key is in bloom format: [B*Hkv, D, T]
                 # Ensure we don't slice beyond actual size
                 max_slice = min(safe_prefix_length, key_flat.shape[2])
-                key_cache[i] = key_flat[:, :, :max_slice]
+                if max_slice < key_flat.shape[2]:
+                    key_cache[i] = key_flat[:, :, :max_slice].contiguous()
+                else:
+                    key_cache[i] = key_flat
             else:
                 # Fallback for other formats
                 max_slice = min(safe_prefix_length, key_flat.shape[1] if len(key_flat.shape) >= 2 else safe_prefix_length)
-                key_cache[i] = key_flat[:, :max_slice]
+                if max_slice < (key_flat.shape[1] if len(key_flat.shape) >= 2 else key_flat.shape[0]):
+                    key_cache[i] = key_flat[:, :max_slice].contiguous()
+                else:
+                    key_cache[i] = key_flat
+            
             # Ensure value slice doesn't exceed actual size
             max_value_slice = min(safe_prefix_length, value_flat.shape[1] if len(value_flat.shape) >= 2 else safe_prefix_length)
-            value_cache[i] = value_flat[:, :max_value_slice]
+            if max_value_slice < value_flat.shape[1]:
+                value_cache[i] = value_flat[:, :max_value_slice].contiguous()
+            else:
+                value_cache[i] = value_flat
+            
             # Final shape: key [batch * num_kv_heads, head_dim, kv_length] (bloom format)
             # Final shape: value [batch * num_kv_heads, kv_length, head_dim]
+        
         layer_past = tuple(chain(*zip(key_cache, value_cache)))
-        return PerDeviceTensors(*layer_past) if len(self.module.module_shards) > 1 else layer_past
+        result = PerDeviceTensors(*layer_past) if len(self.module.module_shards) > 1 else layer_past
+        actual_selected_length = min_actual_seq_len if min_actual_seq_len is not None else prefix_length
+        return result, min(prefix_length, actual_selected_length)
 
     def _update_cache_inplace(
         self, cache_tensors: Sequence[torch.Tensor], new_kvs: Sequence[torch.Tensor], prefix_length: int
@@ -284,10 +343,26 @@ class _MergedInferenceStep:
         assert len(inference_infos) == len(
             optional_prompts
         ), f"found {len(inference_infos)} blocks but {len(optional_prompts)} prompts"
+        min_actual_cache_size = None
         for inference_info, optional_prompt in zip(inference_infos, optional_prompts):
             if optional_prompt is not None:
                 hidden_states[:, : optional_prompt.shape[1]] += optional_prompt
-            (hidden_states,) = self.backends[inference_info.uid].inference_step(
+            result = self.backends[inference_info.uid].inference_step(
                 hidden_states, hypo_ids, inference_info, token_type_ids=token_type_ids
             )
-        return (hidden_states,)
+            # Handle both old (single value) and new (tuple with cache size) return formats
+            if len(result) == 2:
+                hidden_states, actual_cache_size = result
+                # Track minimum cache size across all backends
+                if min_actual_cache_size is None:
+                    min_actual_cache_size = actual_cache_size
+                else:
+                    min_actual_cache_size = min(min_actual_cache_size, actual_cache_size)
+            else:
+                (hidden_states,) = result
+        
+        # Return both hidden_states and actual_cache_size if available
+        if min_actual_cache_size is not None:
+            return (hidden_states, min_actual_cache_size)
+        else:
+            return (hidden_states,)
