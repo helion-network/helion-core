@@ -222,7 +222,7 @@ async def iterate_rpc_inference(
                     InferenceMetadata(uid, prefix_length, tuple(handles), active_adapter)
                     for uid, handles in zip(requested_uids, cache_handles)
                 )
-                result = await requested_backends[0].inference_pool.submit_task(
+                (hidden_states,) = await requested_backends[0].inference_pool.submit_task(
                     hidden_states,
                     hypo_ids,
                     token_type_ids if token_type_ids is not None else DUMMY_INT64,
@@ -230,25 +230,10 @@ async def iterate_rpc_inference(
                     *prompts,
                     priority=priority,
                 )
-                # Handle both old (single value) and new (tuple with cache size) return formats
-                if len(result) == 2:
-                    hidden_states, actual_cache_size = result
-                    # Update prefix_length if cache was truncated
-                    expected_cache_size = prefix_length + length_increment
-                    if actual_cache_size < expected_cache_size:
-                        new_prefix_length = max(0, actual_cache_size - length_increment)
-                        logger.warning(
-                            f"Cache truncation detected: actual cache size is {actual_cache_size}, "
-                            f"expected {expected_cache_size}. Updating prefix_length from {prefix_length} to {new_prefix_length}."
-                        )
-                        prefix_length = new_prefix_length
-                else:
-                    (hidden_states,) = result
             else:
-                min_actual_cache_size = None
                 for backend, uid, handles, prompt in zip(requested_backends, requested_uids, cache_handles, prompts):
                     inference_infos = (InferenceMetadata(uid, prefix_length, tuple(handles), active_adapter),)
-                    result = await backend.inference_pool.submit_task(
+                    (hidden_states,) = await backend.inference_pool.submit_task(
                         hidden_states,
                         hypo_ids,
                         token_type_ids if token_type_ids is not None else DUMMY_INT64,
@@ -256,27 +241,6 @@ async def iterate_rpc_inference(
                         prompt,
                         priority=priority,
                     )
-                    # Handle both old (single value) and new (tuple with cache size) return formats
-                    if len(result) == 2:
-                        hidden_states, actual_cache_size = result
-                        # Track minimum cache size across all backends
-                        if min_actual_cache_size is None:
-                            min_actual_cache_size = actual_cache_size
-                        else:
-                            min_actual_cache_size = min(min_actual_cache_size, actual_cache_size)
-                    else:
-                        (hidden_states,) = result
-                
-                # Update prefix_length if cache was truncated
-                if min_actual_cache_size is not None:
-                    expected_cache_size = prefix_length + length_increment
-                    if min_actual_cache_size < expected_cache_size:
-                        new_prefix_length = max(0, min_actual_cache_size - length_increment)
-                        logger.warning(
-                            f"Cache truncation detected: actual cache size is {min_actual_cache_size}, "
-                            f"expected {expected_cache_size}. Updating prefix_length from {prefix_length} to {new_prefix_length}."
-                        )
-                        prefix_length = new_prefix_length
 
         # serialize and send last layer outputs
         output_tensors = [

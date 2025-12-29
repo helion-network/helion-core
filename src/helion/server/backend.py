@@ -94,6 +94,11 @@ class TransformerBackend(ModuleBackend):
         for descr in self.get_inference_cache_descriptors(batch_size=1, max_length=1):
             self.cache_bytes_per_token[descr.device] += descr.numel() * get_size_in_bytes(descr.dtype)
 
+        # Track the *effective* KV cache length for each active inference cache (per session).
+        # This is needed for models/layers that return truncated KV caches (e.g., sliding-window attention).
+        # Keyed by cache handle tuple (unique per allocated inference cache).
+        self._kv_cache_lengths: Dict[Tuple[int, ...], int] = {}
+
     def get_inference_cache_descriptors(self, batch_size: int, max_length: int) -> Sequence[TensorDescriptor]:
         """Create tensor descriptors for attention cache tensors used during inference_step"""
         # Prefer explicit head_dim if provided by the model config (e.g., Qwen3),
@@ -143,12 +148,10 @@ class TransformerBackend(ModuleBackend):
             if token_type_ids is not None and not is_dummy(token_type_ids) and hidden_states.shape[1] > 1:
                 max_chunk_length = hidden_states.shape[1]
             output_hidden_states = torch.empty_like(hidden_states) if seq_len > max_chunk_length else None
-            layer_past, actual_prefix_length = self._select_layer_past(cache_tensors, inference_info.prefix_length)
-            
-            # Track actual cache size - start with what we selected from cache
-            # This may be less than prefix_length if cache was truncated
-            actual_cache_size = actual_prefix_length
-            
+            layer_past = self._select_layer_past(
+                cache_tensors, prefix_length=inference_info.prefix_length, cache_handles=inference_info.cache_handles
+            )
+
             for offset in range(0, seq_len, max_chunk_length):
                 chunk_length = min(max_chunk_length, seq_len - offset)
                 hidden_states_chunk = hidden_states[:, offset : offset + chunk_length, :]
@@ -165,33 +168,14 @@ class TransformerBackend(ModuleBackend):
                 else:
                     output_hidden_states = output_hidden_states_chunk  # saves one memcopy
                 layer_past = new_kvs
-                
-                # Check if cache was truncated by examining the returned cache size
-                # new_kvs[0] is key cache in bloom format: [B*Hkv, D, T]
-                if new_kvs and len(new_kvs) >= 2:
-                    returned_key = new_kvs[0]
-                    if len(returned_key.shape) == 3:
-                        # Bloom format: [B*Hkv, D, T], T is at index 2
-                        returned_cache_size = int(returned_key.shape[2])
-                        # Expected size after processing this chunk
-                        expected_size = actual_cache_size + chunk_length
-                        # If returned size is less than expected, truncation occurred
-                        if returned_cache_size < expected_size:
-                            # Calculate what the actual cache size was before this chunk
-                            actual_cache_size = returned_cache_size - chunk_length
-                            logger.debug(
-                                f"Detected cache truncation: actual cache size is {actual_cache_size} "
-                                f"(expected {inference_info.prefix_length + offset})"
-                            )
-                        else:
-                            # Update actual_cache_size to reflect the new chunk
-                            actual_cache_size = returned_cache_size
 
-            # Use actual_cache_size for cache update to ensure consistency
-            self._update_cache_inplace(cache_tensors, new_kvs, actual_cache_size)
-            
-            # Return both hidden_states and actual_cache_size so caller can update prefix_length
-            return (output_hidden_states, actual_cache_size)
+            # Write KV caches back into storage.
+            # IMPORTANT: some models/layers can return a KV cache shorter than (prefix_length + seq_len)
+            # (e.g., sliding window). We align the returned cache to the *end position*.
+            end_pos = inference_info.prefix_length + seq_len
+            self._update_cache_inplace(cache_tensors, new_kvs, end_pos=end_pos, cache_handles=inference_info.cache_handles)
+
+            return (output_hidden_states,)
 
     def _estimate_max_chunk_length(self, hidden_states: torch.Tensor, inference_info: InferenceMetadata) -> int:
         # We assume that attention logit matrices are the main thing that consumes memory, given that
@@ -207,92 +191,110 @@ class TransformerBackend(ModuleBackend):
             for cache_tensor in cache_tensors:
                 cache_tensor[...] = cache_tensor[hypo_ids.to(cache_tensor.device)]  # in-place reorder cache by hypo ids
 
-    def _select_layer_past(self, cache_tensors: Sequence[torch.Tensor], prefix_length: int) -> Tuple[Sequence[torch.Tensor], int]:
-        """
-        Extract first {prefix_length} tokens and reshape them such that they can be used as layer_past.
-        Returns (layer_past, actual_selected_length) where actual_selected_length is the actual number
-        of tokens selected (may be less than prefix_length if cache is truncated).
-        """
+    def _select_layer_past(
+        self, cache_tensors: Sequence[torch.Tensor], *, prefix_length: int, cache_handles: Tuple[int, ...]
+    ) -> Sequence[torch.Tensor]:
+        """Extract past KV tensors for this step, accounting for models that keep a truncated KV cache."""
         key_cache, value_cache = list(cache_tensors[0::2]), list(cache_tensors[1::2])
-        min_actual_seq_len = None
-        
+
+        # If we previously observed that this cache is truncated (e.g., sliding-window),
+        # only feed that many tokens from the *end* of the prefix.
+        kv_len = int(self._kv_cache_lengths.get(cache_handles, prefix_length))
+        kv_len = min(int(prefix_length), kv_len)
+        start = int(prefix_length) - kv_len
+        if start < 0:
+            start = 0
+
         for i in range(len(key_cache)):
-            # Flatten cache: [batch, num_kv_heads, seq_len, head_dim] -> [batch*num_kv_heads, seq_len, head_dim]
-            key_flat = key_cache[i].flatten(0, 1)
-            value_flat = value_cache[i].flatten(0, 1)
-            
-            # Get actual sequence length from value cache shape (more reliable than key cache which may be in bloom format)
-            # Value shape after flatten: [batch*num_kv_heads, seq_len, head_dim]
-            # For value cache, seq_len is at index 1
-            if len(value_flat.shape) >= 2:
-                actual_seq_len = int(value_flat.shape[1])
-            elif len(key_flat.shape) == 3:
-                # Key is in bloom format: [B*Hkv, D, T], so T is at index 2
-                actual_seq_len = int(key_flat.shape[2])
-            else:
-                # Fallback: try to infer from total elements
-                actual_seq_len = value_flat.shape[1] if len(value_flat.shape) >= 2 else key_flat.shape[-1] if len(key_flat.shape) >= 1 else 0
-                actual_seq_len = int(actual_seq_len)
-            
-            # Track minimum actual sequence length across all layers
-            if min_actual_seq_len is None:
-                min_actual_seq_len = actual_seq_len
-            else:
-                min_actual_seq_len = min(min_actual_seq_len, actual_seq_len)
-            
-            # Clamp prefix_length to actual cache size to avoid shape mismatches
-            safe_prefix_length = min(prefix_length, actual_seq_len) if actual_seq_len > 0 else prefix_length
-            
-            if safe_prefix_length != prefix_length and actual_seq_len > 0:
-                logger.warning(
-                    f"Cache prefix_length mismatch: requested {prefix_length} but cache only has {actual_seq_len} tokens. "
-                    f"Using {safe_prefix_length} instead."
-                )
-            
-            # For key: [batch*num_kv_heads, head_dim, seq_len] -> slice to [:,:,:safe_prefix_length]
-            # For value: [batch*num_kv_heads, seq_len, head_dim] -> slice to [:, :safe_prefix_length, :]
-            if len(key_flat.shape) == 3:
-                # Key is in bloom format: [B*Hkv, D, T]
-                # Ensure we don't slice beyond actual size
-                max_slice = min(safe_prefix_length, key_flat.shape[2])
-                if max_slice < key_flat.shape[2]:
-                    key_cache[i] = key_flat[:, :, :max_slice].contiguous()
-                else:
-                    key_cache[i] = key_flat
-            else:
-                # Fallback for other formats
-                max_slice = min(safe_prefix_length, key_flat.shape[1] if len(key_flat.shape) >= 2 else safe_prefix_length)
-                if max_slice < (key_flat.shape[1] if len(key_flat.shape) >= 2 else key_flat.shape[0]):
-                    key_cache[i] = key_flat[:, :max_slice].contiguous()
-                else:
-                    key_cache[i] = key_flat
-            
-            # Ensure value slice doesn't exceed actual size
-            max_value_slice = min(safe_prefix_length, value_flat.shape[1] if len(value_flat.shape) >= 2 else safe_prefix_length)
-            if max_value_slice < value_flat.shape[1]:
-                value_cache[i] = value_flat[:, :max_value_slice].contiguous()
-            else:
-                value_cache[i] = value_flat
-            
-            # Final shape: key [batch * num_kv_heads, head_dim, kv_length] (bloom format)
-            # Final shape: value [batch * num_kv_heads, kv_length, head_dim]
-        
+            # key cache tensor: [B, Hkv, D, max_len] -> slice along last dim, then flatten
+            key_slice = key_cache[i][..., start:prefix_length].contiguous()
+            key_cache[i] = key_slice.flatten(0, 1)  # [B*Hkv, D, kv_len]
+
+            # value cache tensor: [B, Hkv, max_len, D] -> slice along token dim, then flatten
+            value_slice = value_cache[i][:, :, start:prefix_length, :].contiguous()
+            value_cache[i] = value_slice.flatten(0, 1)  # [B*Hkv, kv_len, D]
+
         layer_past = tuple(chain(*zip(key_cache, value_cache)))
-        result = PerDeviceTensors(*layer_past) if len(self.module.module_shards) > 1 else layer_past
-        actual_selected_length = min_actual_seq_len if min_actual_seq_len is not None else prefix_length
-        return result, min(prefix_length, actual_selected_length)
+        return PerDeviceTensors(*layer_past) if len(self.module.module_shards) > 1 else layer_past
 
     def _update_cache_inplace(
-        self, cache_tensors: Sequence[torch.Tensor], new_kvs: Sequence[torch.Tensor], prefix_length: int
-    ):
-        """Writes new key/value tensors back into cache, works in-place"""
-        _batch_size_times_num_kv_heads, head_dim, new_length = new_kvs[0].shape
+        self,
+        cache_tensors: Sequence[torch.Tensor],
+        new_kvs: Sequence[torch.Tensor],
+        *,
+        end_pos: int,
+        cache_handles: Tuple[int, ...],
+    ) -> None:
+        """
+        Writes new key/value tensors back into cache, works in-place.
+
+        Unlike the old implementation, this supports models that return a KV cache shorter than `end_pos`
+        (e.g., sliding-window attention). In that case, we align the returned cache window to `end_pos`.
+        """
+        if not new_kvs:
+            return
+
+        # Infer returned KV length for this step from bloom-format key: [B*Hkv, D, T]
+        returned_lengths = []
+        for new_key in new_kvs[0::2]:
+            if new_key.ndim != 3:
+                continue
+            returned_lengths.append(int(new_key.shape[-1]))
+        if returned_lengths:
+            returned_kv_len = min(returned_lengths)
+            if max(returned_lengths) != returned_kv_len:
+                logger.warning(f"Inconsistent returned KV lengths across shards: {returned_lengths}, using {returned_kv_len}")
+        else:
+            returned_kv_len = int(end_pos)
+
+        # Persist effective KV length for subsequent steps (per cache/session).
+        self._kv_cache_lengths[cache_handles] = returned_kv_len
+
+        start_pos = int(end_pos) - int(returned_kv_len)
+        if start_pos < 0:
+            # This shouldn't happen, but be safe.
+            start_pos = 0
+
+        # Write keys: cache_key is [B, Hkv, D, max_len], new_key is [B*Hkv, D, returned_kv_len]
         for cache_key, new_key in zip(cache_tensors[0::2], new_kvs[0::2]):
-            new_key = new_key.view(*cache_key.shape[:3], new_length)
-            cache_key[:, :, :, prefix_length:new_length] = new_key[:, :, :, prefix_length:new_length]
+            if new_key.ndim != 3:
+                continue
+            _, head_dim, kv_len = new_key.shape
+            max_len = int(cache_key.shape[-1])
+            if end_pos > max_len:
+                raise ValueError(f"end_pos={end_pos} exceeds cache length={max_len}")
+
+            kv_len = int(kv_len)
+            write_start = start_pos
+            write_end = int(end_pos)
+            write_len = write_end - write_start
+            # Reshape to cache layout
+            new_key_view = new_key.view(*cache_key.shape[:3], kv_len)
+            if kv_len == write_len:
+                cache_key[:, :, :, write_start:write_end] = new_key_view
+            else:
+                # If the returned KV cache is longer than the requested write span (can happen if start_pos was clamped),
+                # align to the *end* of the returned cache.
+                cache_key[:, :, :, write_start:write_end] = new_key_view[:, :, :, -write_len:]
+
+        # Write values: cache_value is [B, Hkv, max_len, D], new_value is [B*Hkv, returned_kv_len, D]
         for cache_value, new_value in zip(cache_tensors[1::2], new_kvs[1::2]):
-            new_value = new_value.view(*cache_value.shape[:2], new_length, head_dim)
-            cache_value[:, :, prefix_length:new_length, :] = new_value[:, :, prefix_length:new_length, :]
+            if new_value.ndim != 3:
+                continue
+            _, kv_len, head_dim = new_value.shape
+            max_len = int(cache_value.shape[-2])
+            if end_pos > max_len:
+                raise ValueError(f"end_pos={end_pos} exceeds cache length={max_len}")
+
+            kv_len = int(kv_len)
+            write_start = start_pos
+            write_end = int(end_pos)
+            write_len = write_end - write_start
+            new_value_view = new_value.view(*cache_value.shape[:2], kv_len, head_dim)
+            if kv_len == write_len:
+                cache_value[:, :, write_start:write_end, :] = new_value_view
+            else:
+                cache_value[:, :, write_start:write_end, :] = new_value_view[:, :, -write_len:, :]
 
     def get_pools(self) -> Sequence[PrioritizedTaskPool]:
         return self.forward_pool, self.backward_pool, self.inference_pool
@@ -343,26 +345,10 @@ class _MergedInferenceStep:
         assert len(inference_infos) == len(
             optional_prompts
         ), f"found {len(inference_infos)} blocks but {len(optional_prompts)} prompts"
-        min_actual_cache_size = None
         for inference_info, optional_prompt in zip(inference_infos, optional_prompts):
             if optional_prompt is not None:
                 hidden_states[:, : optional_prompt.shape[1]] += optional_prompt
-            result = self.backends[inference_info.uid].inference_step(
+            (hidden_states,) = self.backends[inference_info.uid].inference_step(
                 hidden_states, hypo_ids, inference_info, token_type_ids=token_type_ids
             )
-            # Handle both old (single value) and new (tuple with cache size) return formats
-            if len(result) == 2:
-                hidden_states, actual_cache_size = result
-                # Track minimum cache size across all backends
-                if min_actual_cache_size is None:
-                    min_actual_cache_size = actual_cache_size
-                else:
-                    min_actual_cache_size = min(min_actual_cache_size, actual_cache_size)
-            else:
-                (hidden_states,) = result
-        
-        # Return both hidden_states and actual_cache_size if available
-        if min_actual_cache_size is not None:
-            return (hidden_states, min_actual_cache_size)
-        else:
-            return (hidden_states,)
+        return (hidden_states,)
