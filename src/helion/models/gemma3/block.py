@@ -5,8 +5,11 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+from hivemind.utils.logging import get_logger
 from packaging.version import Version
 from transformers.cache_utils import DynamicCache
+
+logger = get_logger(__name__)
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.models.gemma3.modeling_gemma3 import (
     Gemma3DecoderLayer,
@@ -59,8 +62,18 @@ class WrappedGemma3Block(Gemma3DecoderLayer):
         past_length = 0
         cache = None
         if layer_past is not None:
-            past_length = int(layer_past[0].shape[-1])
+            # Derive past_length from actual tensor shape to handle cache mismatches
+            # layer_past[0] is key cache in bloom format: [B*Hkv, D, T]
+            # Use the actual T dimension from the tensor, not a potentially incorrect parameter
+            key_cache_shape = layer_past[0].shape
+            if len(key_cache_shape) == 3:
+                # Bloom format: [B*Hkv, D, T]
+                past_length = int(key_cache_shape[-1])
+            else:
+                # Fallback: try to infer from shape
+                past_length = int(key_cache_shape[-1]) if key_cache_shape else 0
             cache = DynamicCache()
+            # Pass past_length as hint, but _reorder_cache_from_bloom will use actual tensor shape
             key, value = self._reorder_cache_from_bloom(layer_past, batch_size, past_length)
             cache.update(key, value, self.layer_idx)
         elif use_cache:
@@ -143,9 +156,53 @@ class WrappedGemma3Block(Gemma3DecoderLayer):
         key_states = key_states.permute(0, 2, 1).contiguous()
         num_kv_heads = int(getattr(self._text_config, "num_key_value_heads", 1))
         head_dim = int(getattr(self.self_attn, "head_dim", key_states.shape[-1]))
-        key_states = key_states.view(batch_size, num_kv_heads, seq_length, head_dim)
+        # Derive actual sequence length from tensor shape to handle shape mismatches
+        # After permute: key_states is [B*Hkv, T, D], so T = key_states.shape[1]
+        actual_seq_length = key_states.shape[1]
+        # Verify dimensions match expectations and use actual shape if mismatch
+        # Calculate expected dimensions to validate
+        expected_batch_kv = batch_size * num_kv_heads
+        actual_batch_kv = key_states.shape[0]
+        if actual_batch_kv != expected_batch_kv:
+            raise ValueError(
+                f"Cache batch/KV-heads mismatch: expected {expected_batch_kv} (batch={batch_size} * kv_heads={num_kv_heads}), "
+                f"but tensor has {actual_batch_kv} in first dimension"
+            )
+        if actual_seq_length != seq_length:
+            logger.warning(
+                f"Cache sequence length mismatch: expected {seq_length} from past_length, "
+                f"but tensor has {actual_seq_length} tokens. Using tensor shape."
+            )
+        # Validate total elements match before reshape
+        expected_elements = batch_size * num_kv_heads * actual_seq_length * head_dim
+        if key_states.numel() != expected_elements:
+            # Try to derive correct dimensions from actual tensor size
+            total_elements = key_states.numel()
+            # Calculate what the actual dimensions should be
+            if total_elements % (batch_size * num_kv_heads * head_dim) == 0:
+                actual_seq_length = total_elements // (batch_size * num_kv_heads * head_dim)
+                logger.warning(
+                    f"Cache element count mismatch: recalculated sequence length from {seq_length} to {actual_seq_length} "
+                    f"based on tensor size ({total_elements} elements)"
+                )
+            else:
+                raise ValueError(
+                    f"Cannot reshape cache: expected {expected_elements} elements for shape "
+                    f"[{batch_size}, {num_kv_heads}, {actual_seq_length}, {head_dim}], "
+                    f"but tensor has {key_states.numel()} elements with shape {key_states.shape}. "
+                    f"Total elements ({total_elements}) is not divisible by batch*kv_heads*head_dim ({batch_size * num_kv_heads * head_dim})"
+                )
+        key_states = key_states.view(batch_size, num_kv_heads, actual_seq_length, head_dim)
         # value: [B*Hkv, T, D] -> [B, Hkv, T, D]
-        value_states = value_states.view(batch_size, num_kv_heads, seq_length, head_dim)
+        if value_states.shape != key_states.shape[:3] + (head_dim,):
+            # Reorder value states similarly
+            value_actual_seq_length = value_states.shape[1]
+            if value_actual_seq_length != actual_seq_length:
+                logger.warning(
+                    f"Value cache sequence length ({value_actual_seq_length}) differs from key cache ({actual_seq_length})"
+                )
+            actual_seq_length = value_actual_seq_length
+        value_states = value_states.view(batch_size, num_kv_heads, actual_seq_length, head_dim)
         return key_states, value_states
 
     def _reorder_cache_to_bloom(
