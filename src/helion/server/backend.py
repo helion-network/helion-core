@@ -155,14 +155,34 @@ class TransformerBackend(ModuleBackend):
             for offset in range(0, seq_len, max_chunk_length):
                 chunk_length = min(max_chunk_length, seq_len - offset)
                 hidden_states_chunk = hidden_states[:, offset : offset + chunk_length, :]
-                if token_type_ids is not None and not is_dummy(token_type_ids):
-                    output_hidden_states_chunk, new_kvs = self.module.forward(
-                        hidden_states_chunk, layer_past=layer_past, use_cache=True, token_type_ids=token_type_ids
-                    )
-                else:
-                    output_hidden_states_chunk, new_kvs = self.module.forward(
-                        hidden_states_chunk, layer_past=layer_past, use_cache=True
-                    )
+                try:
+                    if token_type_ids is not None and not is_dummy(token_type_ids):
+                        output_hidden_states_chunk, new_kvs = self.module.forward(
+                            hidden_states_chunk, layer_past=layer_past, use_cache=True, token_type_ids=token_type_ids
+                        )
+                    else:
+                        output_hidden_states_chunk, new_kvs = self.module.forward(
+                            hidden_states_chunk, layer_past=layer_past, use_cache=True
+                        )
+                except RuntimeError as e:
+                    # The multiprocessing boundary often drops the inner stack trace; enrich the message.
+                    msg = str(e)
+                    if "Sizes of tensors must match except in dimension" in msg or "Expected size" in msg:
+                        try:
+                            lp0 = layer_past[0] if layer_past is not None and len(layer_past) > 0 else None
+                            lp_kv_len = int(lp0.shape[-1]) if lp0 is not None and lp0.ndim == 3 else None
+                        except Exception:
+                            lp_kv_len = None
+                        tracked_kv_len = int(self._kv_cache_lengths.get(inference_info.cache_handles, -1))
+                        enriched = (
+                            f"{msg}\n"
+                            f"[helion-debug] uid={inference_info.uid} prefix_length={inference_info.prefix_length} "
+                            f"offset={offset} chunk_length={chunk_length} end_pos={inference_info.prefix_length + offset + chunk_length} "
+                            f"layer_past_kv_len={lp_kv_len} tracked_kv_len={tracked_kv_len} "
+                            f"cache_handles={inference_info.cache_handles}"
+                        )
+                        raise RuntimeError(enriched) from e
+                    raise
                 if seq_len > max_chunk_length:
                     output_hidden_states[:, offset : offset + chunk_length] = output_hidden_states_chunk
                 else:
