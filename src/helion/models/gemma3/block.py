@@ -81,7 +81,22 @@ class WrappedGemma3Block(Gemma3DecoderLayer):
             assert key.shape[0] == batch_size, f"Key cache batch size mismatch: {key.shape[0]} != {batch_size}"
             assert value.shape[0] == batch_size, f"Value cache batch size mismatch: {value.shape[0]} != {batch_size}"
             assert key.shape[2] == value.shape[2], f"Key and value cache sequence length mismatch: {key.shape[2]} != {value.shape[2]}"
+            # Ensure key and value have matching shapes in all dimensions
+            assert key.shape == value.shape, f"Key and value cache shape mismatch: key={key.shape}, value={value.shape}"
+            # Log if truncation occurred
+            if past_length != initial_past_length:
+                logger.warning(
+                    f"Cache truncated from {initial_past_length} to {past_length} tokens. "
+                    f"Key shape: {key.shape}, Value shape: {value.shape}"
+                )
             cache.update(key, value, self.layer_idx)
+            # Verify the cache was stored correctly by checking what we can retrieve
+            stored_cache = cache.layers[self.layer_idx]
+            if stored_cache.keys.shape != key.shape or stored_cache.values.shape != value.shape:
+                logger.warning(
+                    f"Cache shape mismatch after storage: stored keys={stored_cache.keys.shape} (expected {key.shape}), "
+                    f"stored values={stored_cache.values.shape} (expected {value.shape})"
+                )
         elif use_cache:
             cache = DynamicCache()
 
