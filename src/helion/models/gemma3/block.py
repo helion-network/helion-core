@@ -68,13 +68,19 @@ class WrappedGemma3Block(Gemma3DecoderLayer):
             key_cache_shape = layer_past[0].shape
             if len(key_cache_shape) == 3:
                 # Bloom format: [B*Hkv, D, T]
-                past_length = int(key_cache_shape[-1])
+                initial_past_length = int(key_cache_shape[-1])
             else:
                 # Fallback: try to infer from shape
-                past_length = int(key_cache_shape[-1]) if key_cache_shape else 0
+                initial_past_length = int(key_cache_shape[-1]) if key_cache_shape else 0
             cache = DynamicCache()
-            # Pass past_length as hint, but _reorder_cache_from_bloom will use actual tensor shape
-            key, value = self._reorder_cache_from_bloom(layer_past, batch_size, past_length)
+            # Pass initial_past_length as hint, but _reorder_cache_from_bloom will use actual tensor shape
+            key, value = self._reorder_cache_from_bloom(layer_past, batch_size, initial_past_length)
+            # Update past_length to match the actual sequence length after reordering (may be truncated)
+            past_length = key.shape[2]  # [B, Hkv, T, D] -> T is at index 2
+            # Validate cache shapes match expected format before updating
+            assert key.shape[0] == batch_size, f"Key cache batch size mismatch: {key.shape[0]} != {batch_size}"
+            assert value.shape[0] == batch_size, f"Value cache batch size mismatch: {value.shape[0]} != {batch_size}"
+            assert key.shape[2] == value.shape[2], f"Key and value cache sequence length mismatch: {key.shape[2]} != {value.shape[2]}"
             cache.update(key, value, self.layer_idx)
         elif use_cache:
             cache = DynamicCache()
