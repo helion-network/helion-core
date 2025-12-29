@@ -181,10 +181,32 @@ class TransformerBackend(ModuleBackend):
         """Extract first {prefix_length} tokens and reshape them such that they can be used as layer_past"""
         key_cache, value_cache = list(cache_tensors[0::2]), list(cache_tensors[1::2])
         for i in range(len(key_cache)):
-            key_cache[i] = key_cache[i].flatten(0, 1)[:, :, :prefix_length]
-            # shape: [batch * num_kv_heads, head_dim, kv_length]
-            value_cache[i] = value_cache[i].flatten(0, 1)[:, :prefix_length]
-            # shape: [batch * num_kv_heads, kv_length, head_dim]
+            # Flatten cache: [batch, num_kv_heads, seq_len, head_dim] -> [batch*num_kv_heads, seq_len, head_dim]
+            key_flat = key_cache[i].flatten(0, 1)
+            value_flat = value_cache[i].flatten(0, 1)
+            # Get actual sequence length from cache shape
+            # Key shape after flatten: [batch*num_kv_heads, head_dim, seq_len] (bloom format)
+            # Value shape after flatten: [batch*num_kv_heads, seq_len, head_dim]
+            # For value cache, seq_len is at index 1
+            actual_seq_len = value_flat.shape[1] if len(value_flat.shape) >= 2 else 0
+            # Clamp prefix_length to actual cache size to avoid shape mismatches
+            safe_prefix_length = min(prefix_length, actual_seq_len) if actual_seq_len > 0 else prefix_length
+            if safe_prefix_length != prefix_length and actual_seq_len > 0:
+                logger.warning(
+                    f"Cache prefix_length mismatch: requested {prefix_length} but cache only has {actual_seq_len} tokens. "
+                    f"Using {safe_prefix_length} instead."
+                )
+            # For key: [batch*num_kv_heads, head_dim, seq_len] -> slice to [:,:,:safe_prefix_length]
+            # For value: [batch*num_kv_heads, seq_len, head_dim] -> slice to [:, :safe_prefix_length, :]
+            if len(key_flat.shape) == 3:
+                # Key is in bloom format: [B*Hkv, D, T]
+                key_cache[i] = key_flat[:, :, :safe_prefix_length]
+            else:
+                # Fallback for other formats
+                key_cache[i] = key_flat[:, :safe_prefix_length]
+            value_cache[i] = value_flat[:, :safe_prefix_length]
+            # Final shape: key [batch * num_kv_heads, head_dim, kv_length] (bloom format)
+            # Final shape: value [batch * num_kv_heads, kv_length, head_dim]
         layer_past = tuple(chain(*zip(key_cache, value_cache)))
         return PerDeviceTensors(*layer_past) if len(self.module.module_shards) > 1 else layer_past
 
