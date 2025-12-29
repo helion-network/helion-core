@@ -156,11 +156,17 @@ class WrappedGemma3Block(Gemma3DecoderLayer):
         key_states = key_states.permute(0, 2, 1).contiguous()
         num_kv_heads = int(getattr(self._text_config, "num_key_value_heads", 1))
         head_dim = int(getattr(self.self_attn, "head_dim", key_states.shape[-1]))
-        # Derive actual sequence length from tensor shape to handle shape mismatches
-        # After permute: key_states is [B*Hkv, T, D], so T = key_states.shape[1]
-        actual_seq_length = key_states.shape[1]
-        # Verify dimensions match expectations and use actual shape if mismatch
-        # Calculate expected dimensions to validate
+        # Always derive actual sequence length from total element count to avoid shape mismatches
+        # This is more robust than relying on shape dimensions which may be incorrect
+        total_elements = key_states.numel()
+        divisor = batch_size * num_kv_heads * head_dim
+        if total_elements % divisor != 0:
+            raise ValueError(
+                f"Cannot reshape cache: total elements ({total_elements}) is not divisible by "
+                f"batch*kv_heads*head_dim ({divisor}). Tensor shape: {key_states.shape}"
+            )
+        actual_seq_length = total_elements // divisor
+        # Verify dimensions match expectations
         expected_batch_kv = batch_size * num_kv_heads
         actual_batch_kv = key_states.shape[0]
         if actual_batch_kv != expected_batch_kv:
@@ -171,37 +177,26 @@ class WrappedGemma3Block(Gemma3DecoderLayer):
         if actual_seq_length != seq_length:
             logger.warning(
                 f"Cache sequence length mismatch: expected {seq_length} from past_length, "
-                f"but tensor has {actual_seq_length} tokens. Using tensor shape."
+                f"but tensor has {actual_seq_length} tokens (calculated from {total_elements} elements). Using actual size."
             )
-        # Validate total elements match before reshape
-        expected_elements = batch_size * num_kv_heads * actual_seq_length * head_dim
-        if key_states.numel() != expected_elements:
-            # Try to derive correct dimensions from actual tensor size
-            total_elements = key_states.numel()
-            # Calculate what the actual dimensions should be
-            if total_elements % (batch_size * num_kv_heads * head_dim) == 0:
-                actual_seq_length = total_elements // (batch_size * num_kv_heads * head_dim)
-                logger.warning(
-                    f"Cache element count mismatch: recalculated sequence length from {seq_length} to {actual_seq_length} "
-                    f"based on tensor size ({total_elements} elements)"
-                )
-            else:
-                raise ValueError(
-                    f"Cannot reshape cache: expected {expected_elements} elements for shape "
-                    f"[{batch_size}, {num_kv_heads}, {actual_seq_length}, {head_dim}], "
-                    f"but tensor has {key_states.numel()} elements with shape {key_states.shape}. "
-                    f"Total elements ({total_elements}) is not divisible by batch*kv_heads*head_dim ({batch_size * num_kv_heads * head_dim})"
-                )
         key_states = key_states.view(batch_size, num_kv_heads, actual_seq_length, head_dim)
         # value: [B*Hkv, T, D] -> [B, Hkv, T, D]
-        if value_states.shape != key_states.shape[:3] + (head_dim,):
-            # Reorder value states similarly
-            value_actual_seq_length = value_states.shape[1]
-            if value_actual_seq_length != actual_seq_length:
-                logger.warning(
-                    f"Value cache sequence length ({value_actual_seq_length}) differs from key cache ({actual_seq_length})"
-                )
-            actual_seq_length = value_actual_seq_length
+        # Calculate value sequence length from element count for consistency
+        value_total_elements = value_states.numel()
+        value_divisor = batch_size * num_kv_heads * head_dim
+        if value_total_elements % value_divisor != 0:
+            raise ValueError(
+                f"Cannot reshape value cache: total elements ({value_total_elements}) is not divisible by "
+                f"batch*kv_heads*head_dim ({value_divisor}). Tensor shape: {value_states.shape}"
+            )
+        value_actual_seq_length = value_total_elements // value_divisor
+        if value_actual_seq_length != actual_seq_length:
+            logger.warning(
+                f"Value cache sequence length ({value_actual_seq_length}) differs from key cache ({actual_seq_length}). "
+                f"Using key cache length for consistency."
+            )
+            # Use key cache length to ensure consistency
+            actual_seq_length = min(actual_seq_length, value_actual_seq_length)
         value_states = value_states.view(batch_size, num_kv_heads, actual_seq_length, head_dim)
         return key_states, value_states
 
