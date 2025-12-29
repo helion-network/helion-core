@@ -58,6 +58,18 @@ class DistributedGemma3Config(Gemma3Config, ClientConfig, PTuneConfig, LMHeadCon
     def num_key_value_groups(self) -> int:
         return int(self.num_attention_heads // self.num_key_value_heads)
 
+    @property
+    def head_dim(self) -> int:
+        """
+        Gemma3/MedGemma may use an explicit attention head dimension that is not equal to
+        hidden_size // num_attention_heads. The server uses this value for KV-cache sizing.
+        """
+        text_cfg = getattr(self, "text_config", None) or self
+        hd = getattr(text_cfg, "head_dim", None)
+        if hd is not None:
+            return int(hd)
+        return int(text_cfg.hidden_size // text_cfg.num_attention_heads)
+
     @classmethod
     def from_pretrained(
         cls,
